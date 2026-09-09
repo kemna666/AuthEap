@@ -1,4 +1,5 @@
 'use strict';
+'require ui';
 'require rpc';
 
 var callGet = rpc.declare({
@@ -381,7 +382,12 @@ return L.view.extend({
 		}, boot ? '关闭开机自启' : '开启开机自启');
 		self._statusEls.bootBtn = bootBtn;
 
-		var statusPanel = E('div', { 'class': 'cbi-section', 'id': 'aec-status' }, [
+		var statusPanel = E('div', {
+			'class': 'cbi-section',
+			'data-tab': 'status',
+			'data-tab-title': '状态',
+			'data-tab-active': true
+		}, [
 			E('h3', {}, '状态'),
 			row('开机自启', elBoot),
 			row('运行中', elRun),
@@ -455,15 +461,21 @@ return L.view.extend({
 		}
 		configBody.appendChild(datalist);
 
-		var configPanel = E('div', { 'class': 'cbi-section', 'id': 'aec-config' }, [
+		var configPanel = E('div', {
+			'class': 'cbi-section',
+			'data-tab': 'config',
+			'data-tab-title': '配置'
+		}, [
 			E('h3', {}, '配置'),
 			configBody
 		]);
 
+		var panes = E('div', {}, [ statusPanel, configPanel ]);
+		ui.tabs.initTabGroup(panes.childNodes);
+
 		return E('div', [
 			E('h2', {}, 'AuthEAP-Client'),
-			statusPanel,
-			configPanel
+			panes
 		]);
 	},
 

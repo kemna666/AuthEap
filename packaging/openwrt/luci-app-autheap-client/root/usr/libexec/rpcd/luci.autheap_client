@@ -127,22 +127,25 @@ do_control() {
 
 # ---------- 方法: list_plugins ----------
 do_plugins() {
-	# 优先从客户端二进制实时读取（真正“由已编译插件决定”）；旧版/失败时回退内置列表
-	local out lines
-	out="$(/usr/bin/autheap --list-plugins 2>/dev/null)" || out=''
-	[ -n "$out" ] || out='rjv3	锐捷 v3/v4 私有认证算法插件
-printer	打印流经本插件的报文大小
-stats	统计认证期间收发报文数量与字节数（示例插件）
-report	如实上报本机真实信息（网卡/MAC/IP/网关/DNS/主机名）与收发计数；不改帧、不伪造状态'
+	# 优先从客户端二进制实时读取（真正“由已编译插件决定”）；旧版/失败时回退内置列表。
+	# 注意：json_add_* 靠环境变量累积，所以循环必须在“当前 shell”里执行；
+	#       用 here-doc（<<EOF）而不是管道，否则子 shell 里加的条目会全部丢失。
+	local out name desc
+	out="$(/usr/bin/autheap --list-plugins 2>/dev/null)"
+	if [ -z "$out" ]; then
+		out="$(printf 'rjv3\t锐捷 v3/v4 私有认证算法插件\nprinter\t打印流经本插件的报文大小\nstats\t统计认证期间收发报文数量与字节数（示例插件）\nreport\t如实上报本机真实信息（网卡/MAC/IP/网关/DNS/主机名）与收发计数；不改帧、不伪造状态')"
+	fi
 	json_init
 	json_add_array plugins
-	printf '%s\n' "$out" | while IFS=$'\t' read -r name desc; do
+	while IFS=$'\t' read -r name desc; do
 		[ -n "$name" ] || continue
 		json_add_object
 		json_add_string name "$name"
 		json_add_string description "$desc"
 		json_close_object
-	done
+	done <<EOF
+$out
+EOF
 	json_close_array
 	json_dump
 	json_cleanup
