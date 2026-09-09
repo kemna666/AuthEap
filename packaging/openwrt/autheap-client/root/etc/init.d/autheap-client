@@ -104,8 +104,9 @@ start_service() {
 	fi
 
 	procd_open_instance
-	# CLI 的回显（stdout/stderr）重定向到 $LOGFILE，供 LuCI 状态页展示
-	procd_set_param command /bin/sh -c "exec >> \"$LOGFILE\" 2>&1; eval \"exec $PROG $args\""
+	# CLI 的回显（stdout/stderr）重定向到 $LOGFILE，供 LuCI 状态页展示；
+	# 直接用 exec（不用 eval，避免含空格值如 version_str 被拆成多个参数）
+	procd_set_param command /bin/sh -c "exec >> \"$LOGFILE\" 2>&1; exec $PROG $args"
 	procd_set_param pidfile "$PIDFILE"
 	procd_set_param respawn 5 60 5
 	procd_close_instance
