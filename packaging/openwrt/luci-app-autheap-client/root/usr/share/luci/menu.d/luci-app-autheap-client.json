@@ -9,17 +9,5 @@
 		"depends": {
 			"acl": [ "luci-app-autheap-client" ]
 		}
-	},
-
-	"admin/network/autheapclient/config": {
-		"title": "配置",
-		"order": 20,
-		"action": {
-			"type": "view",
-			"path": "autheapclient/config"
-		},
-		"depends": {
-			"acl": [ "luci-app-autheap-client" ]
-		}
 	}
 }
