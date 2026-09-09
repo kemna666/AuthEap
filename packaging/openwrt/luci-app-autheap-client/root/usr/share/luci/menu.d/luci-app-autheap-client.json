@@ -3,8 +3,31 @@
 		"title": "AuthEAP-Client",
 		"order": 60,
 		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-autheap-client" ]
+		}
+	},
+
+	"admin/network/autheapclient/overview": {
+		"title": "状态",
+		"order": 10,
+		"action": {
 			"type": "view",
 			"path": "autheapclient/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-autheap-client" ]
+		}
+	},
+
+	"admin/network/autheapclient/config": {
+		"title": "配置",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "autheapclient/config"
 		},
 		"depends": {
 			"acl": [ "luci-app-autheap-client" ]
