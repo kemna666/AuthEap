@@ -23,6 +23,15 @@ fn main() -> ExitCode {
 
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse_args();
+
+    // 列出已编译插件后立即退出（供 LuCI / 脚本枚举；不要求网卡与配置）
+    if cli.list_plugins {
+        for (name, desc) in minieap::plugins::available() {
+            println!("{name}\t{desc}");
+        }
+        return Ok(());
+    }
+
     let cfg: Config = cli.into_config()?;
 
     set_level(if cfg.verbose >= 2 {

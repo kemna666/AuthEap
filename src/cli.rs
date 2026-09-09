@@ -37,6 +37,10 @@ pub struct Cli {
     #[arg(short = 'm', long = "plugin", alias = "module", value_name = "NAME", action = ArgAction::Append)]
     pub plugins: Vec<String>,
 
+    /// 列出本程序已编译进的所有插件（名字与描述）后退出，不做任何认证
+    #[arg(long = "list-plugins")]
+    pub list_plugins: bool,
+
     /// 心跳间隔（秒，0 关闭；默认 20）
     #[arg(short = 'e', long = "heartbeat", value_name = "SECS")]
     pub heartbeat: Option<u64>,

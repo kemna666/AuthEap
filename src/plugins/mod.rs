@@ -67,3 +67,17 @@ pub fn build_manager(cfg: &Config, mac: [u8; 6], names: &[String]) -> PluginMana
     }
     m
 }
+
+/// 列出本程序已编译进的所有插件（name, description）。
+///
+/// 供 `autheap --list-plugins` 使用，LuCI 的“启用插件”多选下拉会根据它动态生成选项：
+/// 以后新增插件只需在 [`create`] 里登记，这里同步补一行即可（也可从各插件的
+/// `name()/description()` 提取，但保持静态表最简单、免构造实例）。
+pub fn available() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("rjv3", "锐捷 v3/v4 私有认证算法插件"),
+        ("printer", "打印流经本插件的报文大小"),
+        ("stats", "统计认证期间收发报文数量与字节数（示例插件）"),
+        ("report", "如实上报本机真实信息（网卡/MAC/IP/网关/DNS/主机名）与收发计数；不改帧、不伪造状态"),
+    ]
+}

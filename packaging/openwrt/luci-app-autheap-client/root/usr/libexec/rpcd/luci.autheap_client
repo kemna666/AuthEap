@@ -16,10 +16,10 @@ getval() { # getval <option> <default>
 	[ -n "$v" ] || v="$2"
 	printf '%s' "$v"
 }
-bval() { # bval <option> <default(0/1)>  -> true/false
+bval() { # bval <option> <default(0/1)>  -> 1/0（jshn 布尔只认数值 0/1）
 	case "$(getval "$1" "$2")" in
-		1|true|on) printf 'true' ;;
-		*) printf 'false' ;;
+		1|true|on) printf '1' ;;
+		*) printf '0' ;;
 	esac
 }
 ival() { getval "$1" "$2"; }
@@ -65,9 +65,11 @@ do_set() {
 		nv="$((v))"
 		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$nv" ] || { uci set "$CONF.main.$k=$nv"; changed=1; }
 	done
+	# 字符串字段：显式提交即写入（含清空为 "" 的情况，避免旧值残留）；缺失的键不动
 	for k in ifname username backend extra_plugins dhcp_script service version_str fake_dns1 fake_dns2 fake_serial; do
+		json_get_type _t "$k"
+		[ "$_t" = "string" ] || continue
 		json_get_var v "$k"
-		[ -n "$v" ] || continue
 		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$v" ] || { uci set "$CONF.main.$k=$v"; changed=1; }
 	done
 	[ "$changed" = 1 ] && uci commit "$CONF"
@@ -91,7 +93,7 @@ do_ifaces() {
 do_status() {
 	json_init
 	json_add_boolean enabled "$(bval enabled 0)"
-	json_add_boolean running "$([ -f /var/run/autheap-client.pid ] && echo true || echo false)"
+	json_add_boolean running "$([ -f /var/run/autheap-client.pid ] && echo 1 || echo 0)"
 	json_add_string username "$(getval username '')"
 	json_add_string ifname   "$(getval ifname eth0)"
 	json_add_object plugins
@@ -123,11 +125,34 @@ do_control() {
 	echo "{\"res\":true,\"action\":\"$action\"}"
 }
 
+# ---------- 方法: list_plugins ----------
+do_plugins() {
+	# 优先从客户端二进制实时读取（真正“由已编译插件决定”）；旧版/失败时回退内置列表
+	local out lines
+	out="$(/usr/bin/autheap --list-plugins 2>/dev/null)" || out=''
+	[ -n "$out" ] || out='rjv3	锐捷 v3/v4 私有认证算法插件
+printer	打印流经本插件的报文大小
+stats	统计认证期间收发报文数量与字节数（示例插件）
+report	如实上报本机真实信息（网卡/MAC/IP/网关/DNS/主机名）与收发计数；不改帧、不伪造状态'
+	json_init
+	json_add_array plugins
+	printf '%s\n' "$out" | while IFS=$'\t' read -r name desc; do
+		[ -n "$name" ] || continue
+		json_add_object
+		json_add_string name "$name"
+		json_add_string description "$desc"
+		json_close_object
+	done
+	json_close_array
+	json_dump
+	json_cleanup
+}
+
 # ---------- 派发 ----------
 case "$1" in
 "list")
 	json_init
-	for m in get_config set_config list_interfaces status control; do
+	for m in get_config set_config list_interfaces list_plugins status control; do
 		json_add_object "$m"
 		json_close_object
 	done
@@ -150,6 +175,10 @@ case "$1" in
 		list_interfaces)
 			read -r _input
 			do_ifaces
+			;;
+		list_plugins)
+			read -r _input
+			do_plugins
 			;;
 		status)
 			read -r _input

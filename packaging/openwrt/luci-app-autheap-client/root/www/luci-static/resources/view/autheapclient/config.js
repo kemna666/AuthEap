@@ -25,6 +25,12 @@ var callListIfaces = rpc.declare({
 	expect: {}
 });
 
+var callListPlugins = rpc.declare({
+	object: 'luci.autheap_client',
+	method: 'list_plugins',
+	expect: {}
+});
+
 // 表单字段：key -> { title, type: checkbox|text|select|number|password, options?, iface? }
 var FIELDS = {
 	enabled:          { title: '开机自启（系统启动时自动运行）', type: 'checkbox' },
@@ -32,7 +38,6 @@ var FIELDS = {
 	username:         { title: '用户名',   type: 'text' },
 	password:         { title: '密码（存于 UCI，只读回显为空）', type: 'password' },
 	backend:          { title: '收发包后端', type: 'select', options: { raw: 'raw (AF_PACKET)', pcap: 'pcap (需 feature)' } },
-	extra_plugins:    { title: '其他插件（空格/逗号分隔；需已编译进客户端，如你自己写的插件名）', type: 'text' },
 	heartbeat:        { title: '心跳间隔（秒，0 关闭）', type: 'number' },
 	eap_bcast_addr:   { title: 'EAPOL-Start 广播地址 (0/1)', type: 'select', options: { 0: '0=标准', 1: '1=锐捷' } },
 	dhcp_type:        { title: 'DHCP 方式', type: 'select', options: { 0: '0=不使用', 1: '1=二次认证', 2: '2=认证后', 3: '3=认证前' } },
@@ -176,13 +181,7 @@ function buildIface(value, ifaces, inputs) {
 }
 
 // ---- 插件多选下拉 ----
-var PLUGIN_OPTS = [
-	[ 'rjv3', 'rjv3（锐捷认证）' ],
-	[ 'printer', 'printer（打印收发包）' ],
-	[ 'stats', 'stats（统计）' ]
-];
-
-// 多选下拉：options=[[value,label]...]; holder.get() 返回当前选中值数组
+// options: [ [value, label, description?], ... ]（由 list_plugins 动态提供）
 function buildMultiSelect(options, selected, holder) {
 	var cur = (selected || []).slice();
 	var shown = false;
@@ -229,6 +228,8 @@ function buildMultiSelect(options, selected, holder) {
 			var lbl = E('span', {}, opt[1]);
 			row.appendChild(mark);
 			row.appendChild(lbl);
+			if (opt[2])
+				row.appendChild(E('span', { 'style': 'color:#888;font-size:12px' }, ' — ' + opt[2]));
 			row.addEventListener('click', function (ev) {
 				ev.stopPropagation();
 				var i = cur.indexOf(v);
@@ -252,18 +253,21 @@ function buildMultiSelect(options, selected, holder) {
 	return bar;
 }
 
-// 把多选结果映射回后端布尔字段
+// 把多选结果映射回后端字段：rjv3/printer/stats 用布尔，其它名字进 extra_plugins
 function applyPlugins(d, sel) {
 	d.plugin_rjv3 = sel.indexOf('rjv3') >= 0;
 	d.plugin_printer = sel.indexOf('printer') >= 0;
 	d.plugin_stats = sel.indexOf('stats') >= 0;
+	d.extra_plugins = sel.filter(function (n) {
+		return n !== 'rjv3' && n !== 'printer' && n !== 'stats';
+	}).join(' ');
 }
 
 return L.view.extend({
 	load: function () {
-		// 同时取配置与网卡列表
-		return Promise.all([ callGet(), callListIfaces() ]).then(function (r) {
-			return { cfg: r[0], ifaces: (r[1] && r[1].interfaces) || [] };
+		// 取配置、网卡列表、可用插件列表
+		return Promise.all([ callGet(), callListIfaces(), callListPlugins() ]).then(function (r) {
+			return { cfg: r[0], ifaces: (r[1] && r[1].interfaces) || [], plugins: (r[2] && r[2].plugins) || [] };
 		});
 	},
 
@@ -276,23 +280,40 @@ return L.view.extend({
 		}));
 
 		var sections = E('div', {});
+
+		// 可用插件：由后端 list_plugins 动态读取（读取客户端 --list-plugins）
+		var pluginOptions = (data.plugins || []).map(function (p) {
+			return [ p.name, p.name, p.description || '' ];
+		});
+		// 当前已启用：旧布尔字段 + extra_plugins 里的名字（不在列表中的也补成选项以免丢失）
+		var selNames = [];
+		[ 'rjv3', 'printer', 'stats' ].forEach(function (k) {
+			if (cfg['plugin_' + k]) selNames.push(k);
+		});
+		if (cfg.extra_plugins)
+			String(cfg.extra_plugins).split(/[\s,]+/).forEach(function (n) {
+				if (n) selNames.push(n);
+			});
+		selNames.forEach(function (n) {
+			var exists = pluginOptions.some(function (o) { return o[0] === n; });
+			if (!exists) pluginOptions.push([ n, n, '' ]);
+		});
+
 		var pluginHolder = { get: function () { return []; } };
-		var pluginBuilt = false;
+		var pluginBar = buildMultiSelect(pluginOptions, selNames, pluginHolder);
+		var pluginField = E('div', { 'class': 'cbi-value' }, [
+			E('div', { 'class': 'cbi-value-title' }, '启用插件（可多选，选项来自客户端已编译插件）'),
+			E('div', { 'class': 'cbi-value-field' }, [ pluginBar ])
+		]);
+
+		var pluginDone = false;
 		Object.keys(FIELDS).forEach(function (key) {
-			if (key === 'plugin_rjv3' || key === 'plugin_printer' || key === 'plugin_stats')
-				return;
 			var spec = FIELDS[key];
 
-			// 在“其他插件”之前插入插件多选下拉
-			if (key === 'extra_plugins' && !pluginBuilt) {
-				var init = [];
-				PLUGIN_OPTS.forEach(function (p) { if (cfg['plugin_' + p[0]]) init.push(p[0]); });
-				var bar = buildMultiSelect(PLUGIN_OPTS, init, pluginHolder);
-				sections.appendChild(E('div', { 'class': 'cbi-value' }, [
-					E('div', { 'class': 'cbi-value-title' }, '启用插件（可多选）'),
-					E('div', { 'class': 'cbi-value-field' }, [ bar ])
-				]));
-				pluginBuilt = true;
+			// 在 heartbeat 之前插入“插件”多选
+			if (key === 'heartbeat' && !pluginDone) {
+				sections.appendChild(pluginField);
+				pluginDone = true;
 			}
 
 			var el;
@@ -307,6 +328,8 @@ return L.view.extend({
 				E('div', { 'class': 'cbi-value-field' }, [ el ])
 			]));
 		});
+		if (!pluginDone)
+			sections.appendChild(pluginField);
 		sections.appendChild(datalist);
 
 		var applyBtn = E('button', { 'class': 'cbi-button cbi-button-apply' }, '保存并应用');
