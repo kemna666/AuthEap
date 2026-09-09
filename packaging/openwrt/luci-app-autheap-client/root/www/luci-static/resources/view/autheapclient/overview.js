@@ -28,6 +28,12 @@ function esc(s) {
 		.replace(/"/g, '&quot;');
 }
 
+// 取日志末尾若干行并倒序（最新在上，方便查看）
+function tailLog(s) {
+	var lines = String(s || '').split('\n').filter(function (l) { return l.trim(); });
+	return lines.slice(-50).reverse().join('\n');
+}
+
 function fmtPlugins(p) {
 	if (!p) return '-';
 	var parts = [];
@@ -62,6 +68,30 @@ return L.view.extend({
 		var boot = (st.enabled === true || st.enabled === 1);
 		var running = (st.running === true || st.running === 1);
 
+		// 顶部“认证状态”横幅
+		var authText, authColor;
+		if (!running) {
+			authText = '未运行';
+			authColor = '#888888';
+		}
+		else if (st.auth === 'success') {
+			authText = '认证成功';
+			authColor = '#2e7d32';
+		}
+		else if (st.auth === 'failed') {
+			authText = '认证失败';
+			authColor = '#c62828';
+		}
+		else {
+			authText = '认证中…';
+			authColor = '#ef8f00';
+		}
+		var authBanner = E('div', {
+			'style': 'padding:10px 14px;margin-bottom:10px;border:1px solid ' + authColor + ';' +
+			         'border-radius:4px;background:rgba(127,127,127,.12);' +
+			         'color:' + authColor + ';font-size:20px;font-weight:bold;text-align:center'
+		}, authText);
+
 		var bootBtn = E('button', {
 			'class': 'cbi-button cbi-button-action',
 			click: function () {
@@ -74,6 +104,7 @@ return L.view.extend({
 		}, boot ? '关闭开机自启' : '开启开机自启');
 
 		var section = E('div', { 'class': 'cbi-section' }, [
+			authBanner,
 			row('开机自启', boot ? '是' : '否'),
 			row('运行中', running ? '是' : '否'),
 			row('接口', st.ifname || '-'),
@@ -85,9 +116,9 @@ return L.view.extend({
 				actionBtn('重启', 'restart'),
 				bootBtn
 			]),
-			E('h3', {}, '最近日志'),
-			E('pre', { 'style': 'max-height:300px;overflow:auto;background:#222;color:#9f9;padding:8px' },
-				esc(st.log || '(无日志)'))
+			E('h3', {}, '最近日志（最新在上）'),
+			E('pre', { 'style': 'max-height:320px;overflow:auto;background:#222;color:#9f9;padding:8px' },
+				esc(tailLog(st.log)) || '(无日志)')
 		]);
 
 		return E('div', { 'class': 'cbi-map' }, [

@@ -59,22 +59,31 @@ start_service() {
 	local args="-i $ifname -u \"$username\""
 	[ -n "$backend" ] && [ "$backend" != "raw" ] && args="$args -b $backend"
 
-	if [ "$plugin_rjv3" = "1" ]; then
-		args="$args --plugin rjv3"
-	fi
-	if [ "$plugin_printer" = "1" ]; then
-		args="$args --plugin printer"
-	fi
-	if [ "$plugin_stats" = "1" ]; then
-		args="$args --plugin stats"
-	fi
-
-	# LuCI / 用户自加的其他插件名（空格或逗号分隔，需已编译进客户端）
-	if [ -n "$extra_plugins" ]; then
+	# 插件：新版 LuCI 写入 UCI list `plugins`；旧配置无 list 时回退到 布尔 + extra_plugins
+	local plugins
+	plugins="$(uci -q get autheap-client.main.plugins 2>/dev/null)"
+	if [ -n "$plugins" ]; then
 		local p
-		for p in $(echo "$extra_plugins" | tr ',' ' '); do
+		for p in $plugins; do
 			[ -n "$p" ] && args="$args --plugin $p"
 		done
+	else
+		if [ "$plugin_rjv3" = "1" ]; then
+			args="$args --plugin rjv3"
+		fi
+		if [ "$plugin_printer" = "1" ]; then
+			args="$args --plugin printer"
+		fi
+		if [ "$plugin_stats" = "1" ]; then
+			args="$args --plugin stats"
+		fi
+		# 旧版“其他插件”名字（空格/逗号分隔，需已编译进客户端）
+		if [ -n "$extra_plugins" ]; then
+			local q
+			for q in $(echo "$extra_plugins" | tr ',' ' '); do
+				[ -n "$q" ] && args="$args --plugin $q"
+			done
+		fi
 	fi
 
 	args="$args --heartbeat $heartbeat --eap-bcast-addr $eap_bcast_addr \
@@ -95,13 +104,10 @@ start_service() {
 	fi
 
 	procd_open_instance
-	# eval 展开带引号的参数，用 sh -c 交由 procd 管理
-	procd_set_param command /bin/sh -c "eval \\\"exec $PROG $args\\\""
+	# CLI 的回显（stdout/stderr）重定向到 $LOGFILE，供 LuCI 状态页展示
+	procd_set_param command /bin/sh -c "exec >> \"$LOGFILE\" 2>&1; eval \"exec $PROG $args\""
 	procd_set_param pidfile "$PIDFILE"
 	procd_set_param respawn 5 60 5
-	procd_set_param stdout 1
-	procd_set_param stderr 1
-	procd_set_param file "$LOGFILE"
 	procd_close_instance
 }
 

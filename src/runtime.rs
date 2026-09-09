@@ -160,6 +160,11 @@ impl App {
         self.timers.iter().map(|t| t.at).min()
     }
 
+    /// 把当前认证状态写入状态文件（供 LuCI 状态页读取；失败静默忽略）
+    fn write_auth_state(&self, state: &str) {
+        let _ = std::fs::write("/var/run/autheap-client.auth", state);
+    }
+
     /// 发送帧（先按顺序交给插件 prepare）
     fn send_frame(&mut self, frame: &mut Frame) -> Result<()> {
         self.plugins.prepare_all(frame);
@@ -169,6 +174,7 @@ impl App {
     /// 清理并开始一轮新认证（发送 EAPOL-Start）
     pub fn start(&mut self) -> Result<()> {
         self.authed = false;
+        self.write_auth_state("connecting");
         self.keepalive_running = false;
         self.dhcp_waiting = false;
         self.cancel_kind(TimerKind::Watchdog);
@@ -237,10 +243,12 @@ impl App {
         self.dhcp_waiting = false;
         crate::log_info!("认证成功");
         self.authed = true;
+        self.write_auth_state("success");
     }
 
     fn enter_keepalive(&mut self, interval: u64) {
         self.authed = true;
+        self.write_auth_state("success");
         self.dhcp_waiting = false;
         self.cancel_watchdog();
         self.cancel_kind(TimerKind::DhcpRetry);
@@ -338,6 +346,7 @@ impl App {
                 self.schedule(TimerKind::RestartAuth, Duration::from_secs(1));
             } else {
                 crate::log_error!("认证掉线，正在退出……");
+                self.write_auth_state("failed");
                 self.shutdown.store(true, Ordering::Relaxed);
             }
             return;
@@ -346,6 +355,7 @@ impl App {
         self.fail_count += 1;
         if self.fail_count >= self.cfg.max_failures {
             crate::log_error!("认证失败 {} 次，已达到指定次数，正在退出……", self.fail_count);
+            self.write_auth_state("failed");
             self.shutdown.store(true, Ordering::Relaxed);
         } else {
             crate::log_warn!(
@@ -363,6 +373,7 @@ impl App {
 
     fn teardown_session(&mut self) {
         self.authed = false;
+        self.write_auth_state("connecting");
         self.keepalive_running = false;
         self.cancel_kind(TimerKind::Keepalive);
         self.cancel_kind(TimerKind::DhcpRetry);

@@ -93,17 +93,39 @@ do_ifaces() {
 do_status() {
 	json_init
 	json_add_boolean enabled "$(bval enabled 0)"
-	json_add_boolean running "$([ -f /var/run/autheap-client.pid ] && echo 1 || echo 0)"
+	json_add_boolean running "$(pidof autheap >/dev/null 2>&1 && echo 1 || echo 0)"
+	json_add_string auth "$([ -f /var/run/autheap-client.auth ] && cat /var/run/autheap-client.auth 2>/dev/null || echo unknown)"
 	json_add_string username "$(getval username '')"
 	json_add_string ifname   "$(getval ifname eth0)"
 	json_add_object plugins
-		json_add_boolean rjv3    "$(bval plugin_rjv3 1)"
-		json_add_boolean printer "$(bval plugin_printer 0)"
-		json_add_boolean stats   "$(bval plugin_stats 0)"
-		json_add_string  extra   "$(getval extra_plugins '')"
+		local p rjv3 printer stats extra plugins
+		plugins="$(uci -q get "$CONF.main.plugins" 2>/dev/null)"
+		rjv3=0; printer=0; stats=0; extra=''
+		if [ -n "$plugins" ]; then
+			# 新：UCI list plugins（可能含换行分隔）
+			for p in $(printf '%s\n' "$plugins"); do
+				[ -n "$p" ] || continue
+				case "$p" in
+					rjv3) rjv3=1 ;;
+					printer) printer=1 ;;
+					stats) stats=1 ;;
+					*) [ -z "$extra" ] && extra="$p" || extra="$extra $p" ;;
+				esac
+			done
+		else
+			# 旧：布尔 + extra_plugins
+			rjv3="$(bval plugin_rjv3 1)"
+			printer="$(bval plugin_printer 0)"
+			stats="$(bval plugin_stats 0)"
+			extra="$(getval extra_plugins '')"
+		fi
+		json_add_boolean rjv3 "$rjv3"
+		json_add_boolean printer "$printer"
+		json_add_boolean stats "$stats"
+		json_add_string  extra "$extra"
 	json_close_object
 	local log=''
-	[ -f /var/log/autheap-client.log ] && log="$(head -c 4096 /var/log/autheap-client.log 2>/dev/null)"
+	[ -s /var/log/autheap-client.log ] && log="$(tail -c 4096 /var/log/autheap-client.log 2>/dev/null)"
 	json_add_string log "$log"
 	json_dump
 	json_cleanup
