@@ -1,0 +1,111 @@
+#!/bin/sh /etc/rc.common
+# OpenWrt 启动脚本：AuthEAP-Client (Rust)
+#
+# 语义说明：
+#   - “开机自启”由本脚本的 enable/disable（生成/移除 /etc/rc.d 软链）控制，
+#     安装后默认不随系统启动；LuCI 的“开机自启”开关会调用 enable/disable。
+#   - start/stop/restart 随时可手动执行，不被 UCI enabled 拦截。
+#   - UCI 的 option enabled 仅作 LuCI 显示/同步的指示位（保留兼容）。
+
+START=95
+STOP=10
+
+USE_PROCD=1
+
+PROG=/usr/bin/autheap
+PIDFILE=/var/run/autheap-client.pid
+LOGFILE=/var/log/autheap-client.log
+
+start_service() {
+	config_load autheap-client
+
+	local ifname username backend \
+	      plugin_rjv3 plugin_printer plugin_stats extra_plugins \
+	      heartbeat eap_bcast_addr dhcp_type dhcp_script \
+	      service version_str fake_dns1 fake_dns2 fake_serial \
+	      max_dhcp_count max_retries max_failures stage_timeout
+
+	config_get ifname      main ifname      eth0
+	config_get username    main username    ""
+	config_get backend     main backend     "raw"
+	config_get_bool plugin_rjv3   main plugin_rjv3   1
+	config_get_bool plugin_printer main plugin_printer 0
+	config_get_bool plugin_stats  main plugin_stats  0
+	config_get extra_plugins main extra_plugins ""
+	config_get heartbeat     main heartbeat     20
+	config_get eap_bcast_addr main eap_bcast_addr 0
+	config_get dhcp_type     main dhcp_type     2
+	config_get dhcp_script   main dhcp_script   ""
+	config_get service       main service       "internet"
+	config_get version_str   main version_str   "RG-SU For Linux V1.0"
+	config_get fake_dns1     main fake_dns1     ""
+	config_get fake_dns2     main fake_dns2     ""
+	config_get fake_serial   main fake_serial   ""
+	config_get max_dhcp_count main max_dhcp_count 3
+	config_get max_retries   main max_retries   3
+	config_get max_failures  main max_failures  3
+	config_get stage_timeout main stage_timeout 5
+
+	if [ -z "$username" ]; then
+		logger -t autheap-client "username not set; refusing to start"
+		return 1
+	fi
+
+	[ -x "$PROG" ] || {
+		logger -t autheap-client "binary $PROG missing"
+		return 1
+	}
+
+	local args="-i $ifname -u \"$username\""
+	[ -n "$backend" ] && [ "$backend" != "raw" ] && args="$args -b $backend"
+
+	if [ "$plugin_rjv3" = "1" ]; then
+		args="$args --plugin rjv3"
+	fi
+	if [ "$plugin_printer" = "1" ]; then
+		args="$args --plugin printer"
+	fi
+	if [ "$plugin_stats" = "1" ]; then
+		args="$args --plugin stats"
+	fi
+
+	# LuCI / 用户自加的其他插件名（空格或逗号分隔，需已编译进客户端）
+	if [ -n "$extra_plugins" ]; then
+		local p
+		for p in $(echo "$extra_plugins" | tr ',' ' '); do
+			[ -n "$p" ] && args="$args --plugin $p"
+		done
+	fi
+
+	args="$args --heartbeat $heartbeat --eap-bcast-addr $eap_bcast_addr \
+	      --dhcp-type $dhcp_type --service \"$service\" \
+	      --version-str \"$version_str\" --max-dhcp-count $max_dhcp_count \
+	      --max-retries $max_retries --max-failures $max_failures \
+	      --stage-timeout $stage_timeout"
+
+	# 可选参数（仅在非空时传入，避免引号问题）
+	[ -n "$dhcp_script" ] && args="$args --dhcp-script \"$dhcp_script\""
+	[ -n "$fake_dns1" ] && args="$args --fake-dns1 $fake_dns1"
+	[ -n "$fake_dns2" ] && args="$args --fake-dns2 $fake_dns2"
+	[ -n "$fake_serial" ] && args="$args --fake-serial \"$fake_serial\""
+
+	config_get password main password ""
+	if [ -n "$password" ]; then
+		export MINIEAP_PASSWORD="$password"
+	fi
+
+	procd_open_instance
+	# eval 展开带引号的参数，用 sh -c 交由 procd 管理
+	procd_set_param command /bin/sh -c "eval \\\"exec $PROG $args\\\""
+	procd_set_param pidfile "$PIDFILE"
+	procd_set_param respawn 5 60 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param file "$LOGFILE"
+	procd_close_instance
+}
+
+stop_service() {
+	# procd 会负责 SIGTERM 主进程
+	rm -f "$PIDFILE"
+}

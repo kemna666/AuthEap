@@ -1,0 +1,19 @@
+MiniEAP (Rust) — 第三方代码与致谢
+
+本程序是 https://github.com/updateing/minieap 的 Rust 重写版，遵循 GPL-3.0 许可。
+
+上游版权与来源：
+- minieap（C）：Copyright (c) updateing 及贡献者（GPL-3.0）
+  https://github.com/updateing/minieap
+- MentoHUST（锐捷 v3/v4 校验算法来源）：Copyright (c) Hu Yunrui (hyrathb)
+  https://github.com/hyrathb/mentohust
+- rhash 哈希实现（rjmd5/rjsha1/rjtiger/rjwhirlpool/rjripemd128 移植基础）：
+  Copyright (c) 2007-2012 Aleksey Kravchenko（MIT 许可的算法实现）
+- ampheck 实现（rjripemd128 变体）：Copyright (c) Gabriel A. Petursson（GPL）
+- CRC16（rjcrc16.c）：Georges Menie / Salvatore Sanfilippo（BSD）
+- RSA Data Security MD5（ComputeHash / EAP 应答用标准 MD5）：RSA Data Security
+
+说明：锐捷私有算法（含 Whirlpool/Tiger/MD5/SHA-1/RIPEMD-128 的自定义 IV 与轮常量
+以及 checkV4/computePwd）经逆向得到，本项目从上游 C 源码逐字节移植，未作改动。
+
+本项目仅用于学习研究；请在合规的校园网环境及授权范围内使用。

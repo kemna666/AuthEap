@@ -1,0 +1,164 @@
+#!/bin/sh
+# rpcd exec 后端: luci.autheap_client
+#
+# 协议（与 /usr/libexec/rpcd/luci.argon_wallpaper 一致）：
+#   $1 = list|call ; $2 = 方法名 ; 请求参数(JSON)从 stdin 读取；结果(jshn JSON)输出到 stdout
+# 提供方法: get_config / set_config / list_interfaces / status / control
+
+. /usr/share/libubox/jshn.sh
+
+CONF='autheap-client'
+
+# ---------- 读取辅助 ----------
+getval() { # getval <option> <default>
+	local v
+	v="$(uci -q get "$CONF.main.$1" 2>/dev/null)"
+	[ -n "$v" ] || v="$2"
+	printf '%s' "$v"
+}
+bval() { # bval <option> <default(0/1)>  -> true/false
+	case "$(getval "$1" "$2")" in
+		1|true|on) printf 'true' ;;
+		*) printf 'false' ;;
+	esac
+}
+ival() { getval "$1" "$2"; }
+
+# 追加整段配置到当前 json 对象
+emit_config() {
+	json_add_boolean enabled      "$(bval enabled 0)"
+	json_add_string  ifname       "$(getval ifname eth0)"
+	json_add_string  username     "$(getval username '')"
+	json_add_string  backend      "$(getval backend raw)"
+	json_add_boolean plugin_rjv3  "$(bval plugin_rjv3 1)"
+	json_add_boolean plugin_printer "$(bval plugin_printer 0)"
+	json_add_boolean plugin_stats "$(bval plugin_stats 0)"
+	json_add_string  extra_plugins "$(getval extra_plugins '')"
+	json_add_int     heartbeat    "$(ival heartbeat 20)"
+	json_add_int     eap_bcast_addr "$(ival eap_bcast_addr 0)"
+	json_add_int     dhcp_type    "$(ival dhcp_type 2)"
+	json_add_string  dhcp_script  "$(getval dhcp_script '')"
+	json_add_string  service      "$(getval service internet)"
+	json_add_string  version_str  "$(getval version_str 'RG-SU For Linux V1.0')"
+	json_add_string  fake_dns1    "$(getval fake_dns1 '')"
+	json_add_string  fake_dns2    "$(getval fake_dns2 '')"
+	json_add_string  fake_serial  "$(getval fake_serial '')"
+	json_add_int     max_dhcp_count "$(ival max_dhcp_count 3)"
+	json_add_int     max_retries  "$(ival max_retries 3)"
+	json_add_int     max_failures "$(ival max_failures 3)"
+	json_add_int     stage_timeout "$(ival stage_timeout 5)"
+}
+
+# ---------- 方法: set_config ----------
+do_set() {
+	local changed=0 k v nv
+	json_load "$1"
+	for k in enabled plugin_rjv3 plugin_printer plugin_stats; do
+		json_get_var v "$k"
+		[ -n "$v" ] || continue
+		case "$v" in true|1) nv=1;; *) nv=0;; esac
+		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$nv" ] || { uci set "$CONF.main.$k=$nv"; changed=1; }
+	done
+	for k in heartbeat eap_bcast_addr dhcp_type max_dhcp_count max_retries max_failures stage_timeout; do
+		json_get_var v "$k"
+		[ -n "$v" ] || continue
+		nv="$((v))"
+		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$nv" ] || { uci set "$CONF.main.$k=$nv"; changed=1; }
+	done
+	for k in ifname username backend extra_plugins dhcp_script service version_str fake_dns1 fake_dns2 fake_serial; do
+		json_get_var v "$k"
+		[ -n "$v" ] || continue
+		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$v" ] || { uci set "$CONF.main.$k=$v"; changed=1; }
+	done
+	[ "$changed" = 1 ] && uci commit "$CONF"
+	echo '{"res":true}'
+}
+
+# ---------- 方法: list_interfaces ----------
+do_ifaces() {
+	json_init
+	json_add_array interfaces
+	local i
+	for i in $(sed -n 's/^[[:space:]]*\([^:]*\):.*/\1/p' /proc/net/dev); do
+		json_add_string '' "$i"
+	done
+	json_close_array
+	json_dump
+	json_cleanup
+}
+
+# ---------- 方法: status ----------
+do_status() {
+	json_init
+	json_add_boolean enabled "$(bval enabled 0)"
+	json_add_boolean running "$([ -f /var/run/autheap-client.pid ] && echo true || echo false)"
+	json_add_string username "$(getval username '')"
+	json_add_string ifname   "$(getval ifname eth0)"
+	json_add_object plugins
+		json_add_boolean rjv3    "$(bval plugin_rjv3 1)"
+		json_add_boolean printer "$(bval plugin_printer 0)"
+		json_add_boolean stats   "$(bval plugin_stats 0)"
+		json_add_string  extra   "$(getval extra_plugins '')"
+	json_close_object
+	local log=''
+	[ -f /var/log/autheap-client.log ] && log="$(head -c 4096 /var/log/autheap-client.log 2>/dev/null)"
+	json_add_string log "$log"
+	json_dump
+	json_cleanup
+}
+
+# ---------- 方法: control ----------
+do_control() {
+	local action='restart'
+	json_load "$1"
+	json_get_var action action
+	[ -n "$action" ] || action='restart'
+	case "$action" in
+		enable|disable)
+			uci set "$CONF.main.enabled=$([ "$action" = enable ] && echo 1 || echo 0)"
+			uci commit "$CONF"
+			;;
+	esac
+	/etc/init.d/autheap-client "$action" >/dev/null 2>&1
+	echo "{\"res\":true,\"action\":\"$action\"}"
+}
+
+# ---------- 派发 ----------
+case "$1" in
+"list")
+	json_init
+	for m in get_config set_config list_interfaces status control; do
+		json_add_object "$m"
+		json_close_object
+	done
+	json_dump
+	json_cleanup
+	;;
+"call")
+	case "$2" in
+		get_config)
+			read -r _input
+			json_init
+			emit_config
+			json_dump
+			json_cleanup
+			;;
+		set_config)
+			read -r input
+			do_set "$input"
+			;;
+		list_interfaces)
+			read -r _input
+			do_ifaces
+			;;
+		status)
+			read -r _input
+			do_status
+			;;
+		control)
+			read -r input
+			do_control "$input"
+			;;
+	esac
+	;;
+esac

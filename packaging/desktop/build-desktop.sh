@@ -1,0 +1,34 @@
+#!/bin/sh
+# 构建「仅 CLI」版本（目标：桌面 Linux 宿主机）。
+#
+# 产物是纯命令行可执行文件（不含 OpenWrt/LuCI 任何内容），按内部标识
+# autheap-client 命名输出到 packaging/desktop/out/。
+#
+# 用法:
+#   ./build-desktop.sh                 # 默认 raw 后端（AF_PACKET，Linux，需 root）
+#   ./build-desktop.sh --features backend-pcap   # 使用 libpcap 后端（需先装 libpcap-dev）
+set -eu
+
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+OUT="$REPO/packaging/desktop/out"
+FEATURES=""
+
+for arg in "$@"; do
+	case "$arg" in
+		--features=*) FEATURES="--features ${arg#*=}" ;;
+		--features)   FEATURES="--features backend-pcap" ;;
+		*) echo "[!] 未知参数: $arg" >&2; echo "    用法: build-desktop.sh [--features backend-pcap]" >&2; exit 1 ;;
+	esac
+done
+
+echo "[*] 编译桌面 Linux 版 CLI（autheap）${FEATURES:+（$FEATURES）}..."
+(cd "$REPO" && cargo build --release $FEATURES)
+
+mkdir -p "$OUT"
+cp "$REPO/target/release/autheap" "$OUT/autheap"
+chmod +x "$OUT/autheap"
+
+echo "[*] 完成: $OUT/autheap"
+echo "[*] 快速试运行（raw 后端需 root）:"
+echo "    sudo $OUT/autheap --help"
+echo "[*] 安装到系统: sudo packaging/desktop/install.sh（或 build-deb.sh 打 .deb）"

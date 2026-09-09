@@ -1,0 +1,36 @@
+[package]
+name = "minieap"
+version = "0.1.0"
+edition = "2021"
+description = "可扩展的 802.1x (EAP-MD5) 客户端，带锐捷 v3/v4 算法插件支持 —— Rust 重写版"
+license = "GPL-3.0"
+authors = ["minieap-rs contributors"]
+
+[lib]
+name = "minieap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "autheap"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+# 标准 MD5（用于 EAP-MD5 应答与 ComputeHash）；rjv3 专有变体在 hash/md5.rs 单独移植
+md5std = { package = "md-5", version = "0.10" }
+encoding_rs = "0.8"
+signal-hook = "0.3"
+
+# pcap 后端（可选）。启用需系统安装 libpcap 开发库：
+#   Debian/Ubuntu: sudo apt install libpcap-dev
+# 使用时: cargo build --features backend-pcap
+pcap = { version = "1", optional = true }
+
+[features]
+default = []
+backend-pcap = ["dep:pcap"]
+
+[profile.release]
+opt-level = 3
+lto = true

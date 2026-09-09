@@ -1,0 +1,7 @@
+/target
+
+# OpenWrt 打包中间产物
+packaging/openwrt/staging/
+
+# 桌面打包产物（.deb / 二进制 / 本地 apt 仓库）
+packaging/desktop/out/

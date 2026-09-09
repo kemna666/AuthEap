@@ -1,0 +1,25 @@
+{
+	"admin/network/autheapclient": {
+		"title": "AuthEAP-Client",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "autheapclient/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-autheap-client" ]
+		}
+	},
+
+	"admin/network/autheapclient/config": {
+		"title": "配置",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "autheapclient/config"
+		},
+		"depends": {
+			"acl": [ "luci-app-autheap-client" ]
+		}
+	}
+}

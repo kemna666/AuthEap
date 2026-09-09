@@ -1,0 +1,18 @@
+[Unit]
+Description=AuthEAP-Client 802.1x client (Rust CLI, desktop Linux)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 二进制由 packaging/desktop 安装到 /usr/bin/autheap（deb 或 install.sh）
+ExecStart=/usr/bin/autheap -i eth0 -u <USER> --plugin rjv3
+# 密码写入环境文件 /etc/autheap.env，形如 MINIEAP_PASSWORD=xxxx
+EnvironmentFile=-/etc/autheap.env
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
