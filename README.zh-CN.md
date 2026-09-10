@@ -2,7 +2,7 @@
 
 可扩展的 802.1x (EAP-MD5) 客户端，带 **锐捷 v3/v4** 私有算法插件支持。
 本工程是 [updateing/minieap](https://github.com/updateing/minieap)（C 语言）的
-**功能等价格移植**，采用 Rust 惯用写法重新组织，目标平台 Linux（另可选 libpcap 后端）。
+**功能等价格移植**，采用 Rust 惯用写法重新组织，目标平台 Linux
 
 > ⚠️ 本程序涉及校园网认证客户端领域，仅用于学习研究与你拥有使用授权的网络。
 > 由于锐捷 v3/v4 算法来自逆向工程，请遵守当地网络使用规定。
@@ -113,8 +113,7 @@ sudo autheap -i enp5s0 -u 学号 -p 密码 \
 sudo autheap -i eth0 -u u -p p --plugin printer --plugin rjv3
 ```
 
-常用参数摘要见 `autheap --help`。注意：新的 CLI 为 Rust 风格，不兼容原版 C 的
-`-umyname` 粘连写法；参数值需用空格分隔（`-u myname`）。
+常用参数摘要见 `autheap --help`。
 
 ### 二次认证 / 字段覆盖示例
 
@@ -150,5 +149,5 @@ cargo test
 
 - 上游：<https://github.com/updateing/minieap>（GPL-3.0），作者 updateing 等。
 - 锐捷算法来源：Hu Yunrui 的 [MentoHUST](https://github.com/hyrathb/mentohust)，
-  以及 rhash / ampheck 哈希库；原版哈希经逆向修改，本工程逐字节照抄。
+  以及 rhash / ampheck 哈希库；
 - 许可：GPL-3.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）。

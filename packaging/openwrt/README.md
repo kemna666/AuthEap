@@ -130,8 +130,6 @@ config autheap-client 'main'
 	option stage_timeout '5'
 ```
 
-密码以环境变量方式传给进程（`AUTHEAP_PASSWORD`），不会出现在 `ps` 里。
-请把 `/etc/config/autheap-client` 权限收紧（`chmod 600`）。
 
 ## 排错
 
