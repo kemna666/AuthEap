@@ -1,8 +1,8 @@
-# AuthEAP（Rust 重写版）
+# AuthEAP
 
 可扩展的 802.1x (EAP-MD5) 客户端，带 **锐捷 v3/v4** 私有算法插件支持。
 本工程是 [updateing/minieap](https://github.com/updateing/minieap)（C 语言）的
-**功能等价格移植**，采用 Rust 惯用写法重新组织，目标平台 Linux
+**Rust重写版本**，采用 Rust 惯用写法重新组织，目标平台 Linux
 
 > ⚠️ 本程序涉及校园网认证客户端领域，仅用于学习研究与你拥有使用授权的网络。
 > 由于锐捷 v3/v4 算法来自逆向工程，请遵守当地网络使用规定。
