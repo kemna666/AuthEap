@@ -124,27 +124,6 @@ sudo autheap -i eth0 -u u -p p --plugin printer --plugin rjv3
 --rj-option 6a:000102
 ```
 
-## 测试
-
-```bash
-cargo test
-```
-
-哈希移植的参考向量由原版 C 代码（`rjmd5.c`/`rjsha1.c`/`rjripemd128.c`/
-`rjtiger.c`/`rjwhirlpool.c`/`checkV4.c`）编译生成后内嵌到各单元测试中，
-因此可以脱离校园网在任意机器上验证算法保真度。
-
-## 与上游的差异（重构说明）
-
-| 原版 C | 本 Rust 版 |
-| --- | --- |
-| 模块化 `*.c` + `make` | Cargo 模块 + feature |
-| `config.mk` 选模块 | 运行时 `--plugin` / `--backend`，编译时 feature 选 pcap |
-| `-u myname` 粘连参数 | clap 标准参数 |
-| getopt / iconv / 手写日志 | clap / `encoding_rs`(GBK) / 轻量日志 |
-| 全局单例 + 回调 | 所有权清晰的 `App` 状态机 + 定时器 |
-| 三种后端(sockraw/libpcap/bpf) | `raw`(AF_PACKET) + `pcap`(feature) |
-
 ## 致谢与许可
 
 - 上游：<https://github.com/updateing/minieap>（GPL-3.0），作者 updateing 等。
