@@ -22,7 +22,7 @@ packaging/desktop/
 ├── make-apt-repo.sh        # 生成本地 apt 仓库（可选）
 ├── install.sh              # 非 apt 发行版的系统安装（/usr/bin + systemd）
 ├── autheap.service         # systemd 单元（示例）
-├── autheap.env             # 密码环境文件示例（MINIEAP_PASSWORD）
+├── autheap.env             # 密码环境文件示例（AUTHEAP_PASSWORD）
 ├── README.md
 └── out/                    # 构建产物输出（.deb / 二进制 / apt-repo，自动生成，已 gitignore）
 ```
@@ -41,7 +41,7 @@ sudo autheap -i eth0 -u 学号 -p 密码 --plugin rjv3
 sudo autheap --help
 
 # 4) （可选）编辑密码环境文件（conffile，升级不覆盖）
-sudoedit /etc/autheap.env        # MINIEAP_PASSWORD=你的密码
+sudoedit /etc/autheap.env        # AUTHEAP_PASSWORD=你的密码
 #    并启用 systemd 服务（先按需改 ExecStart 的 -i/-u）
 sudo systemctl enable --now autheap
 
@@ -77,10 +77,10 @@ sudo ./packaging/desktop/out/autheap -i eth0 -u 学号 -p 密码 --plugin rjv3
 
 # 3) 安装为系统服务
 sudo ./packaging/desktop/install.sh
-sudo vim /etc/autheap.env                       # 填 MINIEAP_PASSWORD=你的密码
+sudo vim /etc/autheap.env                       # 填 AUTHEAP_PASSWORD=你的密码
 sudo systemctl enable --now autheap
 ```
 
-> 说明：Rust 工程的库 crate 仍叫 `minieap`，但命令行产物已统一命名为 `autheap`
+> 说明：Rust 工程的库 crate 仍叫 `autheap`，但命令行产物已统一命名为 `autheap`
 > （`cargo build --release` 产出 `target/release/autheap`），与 OpenWrt/桌面安装的命令一致。
-> 密码环境变量仍为 `MINIEAP_PASSWORD`（命令行 `-p` 亦可）。
+> 密码环境变量仍为 `AUTHEAP_PASSWORD`（命令行 `-p` 亦可）。

@@ -27,7 +27,7 @@ fi
 systemctl daemon-reload
 
 echo "[*] 已安装：/usr/bin/autheap"
-echo "[*] 请编辑 /etc/autheap.env 填好 MINIEAP_PASSWORD（或去掉环境文件改用 --password）"
+echo "[*] 请编辑 /etc/autheap.env 填好 AUTHEAP_PASSWORD（或去掉环境文件改用 --password）"
 echo "    并把 /etc/systemd/system/autheap.service 里的 -i eth0 / -u <USER> 改为你的网卡和账号"
 echo "[*] 然后: systemctl enable --now autheap"
 echo "[*] 直接命令行: sudo autheap -i eth0 -u 学号 --plugin rjv3"

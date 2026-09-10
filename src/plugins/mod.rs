@@ -9,8 +9,8 @@
 //!
 //! 1. 在 `src/plugins/` 下新建文件（或新子目录），例如 `my_plugin.rs`，里面：
 //!    ```no_run
-//!    use minieap::eth_frame::Frame;
-//!    use minieap::plugin::Plugin;
+//!    use autheap::eth_frame::Frame;
+//!    use autheap::plugin::Plugin;
 //!
 //!    pub struct MyPlugin;
 //!    impl Plugin for MyPlugin {
@@ -45,7 +45,7 @@ pub fn create(name: &str, cfg: &Config, mac: [u8; 6]) -> Option<Box<dyn Plugin>>
     match name {
         // 锐捷认证：一个普通插件（构造时自包含配置与 MAC）
         "rjv3" => Some(Box::new(Rjv3::new(cfg, mac))),
-        "printer" => Some(Box::new(Printer::new())),
+        "printer" => Some(Box::new(Printer::new(cfg.printer_log_recv))),
         // 用户示例插件：流量统计
         "stats" | "example" => Some(Box::new(example::TrafficStats::default())),
         // 如实上报本机真实信息的独立插件（不改帧、不伪造状态）

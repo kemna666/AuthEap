@@ -3,7 +3,7 @@
 		"description": "Grant access to AuthEAP-Client LuCI app",
 		"read": {
 			"ubus": {
-				"luci.autheap_client": [ "get_config", "list_interfaces", "list_plugins", "status" ],
+				"luci.autheap_client": [ "get_config", "list_interfaces", "list_plugins", "status", "log" ],
 				"service": [ "list" ],
 				"file": [ "read" ]
 			},

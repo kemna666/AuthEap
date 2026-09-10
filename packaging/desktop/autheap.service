@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 # 二进制由 packaging/desktop 安装到 /usr/bin/autheap（deb 或 install.sh）
 ExecStart=/usr/bin/autheap -i eth0 -u <USER> --plugin rjv3
-# 密码写入环境文件 /etc/autheap.env，形如 MINIEAP_PASSWORD=xxxx
+# 密码写入环境文件 /etc/autheap.env，形如 AUTHEAP_PASSWORD=xxxx
 EnvironmentFile=-/etc/autheap.env
 Restart=on-failure
 RestartSec=5

@@ -60,8 +60,13 @@ return view.extend({
 
 		o = s.option(form.Flag, 'enabled', '开机自启（系统启动时自动运行）');
 
-		o = s.option(widgets.NetworkSelect, 'ifname', '认证网卡', '可从下拉选择或手动输入');
-		o.optional = true;
+		o = s.option(form.Flag, 'daemon', '后台运行（守护模式；不交给 procd 托管，停止用 killall）');
+
+		o = s.option(form.Flag, 'printer_log_recv', 'printer 插件：把收到的帧也打印到日志');
+
+		o = s.option(widgets.DeviceSelect, 'ifname', '认证网卡（设备名，可从下拉选择或手动输入）');
+		o.noaliases = true;
+		o.rmempty = false;
 
 		o = s.option(form.Value, 'username', '用户名');
 

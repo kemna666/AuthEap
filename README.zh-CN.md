@@ -1,4 +1,4 @@
-# MiniEAP（Rust 重写版）
+# AuthEAP（Rust 重写版）
 
 可扩展的 802.1x (EAP-MD5) 客户端，带 **锐捷 v3/v4** 私有算法插件支持。
 本工程是 [updateing/minieap](https://github.com/updateing/minieap)（C 语言）的
@@ -33,7 +33,7 @@
 - **模块化收发包后端**：
   - `raw`：Linux 原生 AF_PACKET（默认，无需外部库，需要 root）。
   - `pcap`：libpcap（跨平台，需编译时启用 `backend-pcap` feature）。
-- **Rust 风格 CLI**（clap）：多参数、插件可重复指定、密码可走环境变量 `MINIEAP_PASSWORD`。
+- **Rust 风格 CLI**（clap）：多参数、插件可重复指定、密码可走环境变量 `AUTHEAP_PASSWORD`。
 - 全面单元测试：所有专有哈希与 `computeV4/computePwd` 均有由**原版 C 编译生成的黄金
   参考向量**逐字节校验。
 
@@ -92,7 +92,7 @@ sudo apt remove autheap                                # 卸载
 # 方式二：源码安装（其它发行版）
 ./packaging/desktop/build-desktop.sh                   # 可选 --features backend-pcap
 sudo ./packaging/desktop/install.sh                    # 装到 /usr/bin + systemd
-sudo vim /etc/autheap.env                              # 填 MINIEAP_PASSWORD
+sudo vim /etc/autheap.env                              # 填 AUTHEAP_PASSWORD
 sudo systemctl enable --now autheap
 ```
 

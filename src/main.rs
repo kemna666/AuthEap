@@ -1,15 +1,15 @@
-//! MiniEAP —— Rust 版可执行入口。
+//! AuthEAP —— Rust 版可执行入口。
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use minieap::cli::Cli;
-use minieap::config::Config;
-use minieap::logging::set_level;
-use minieap::net::{Io, NetIo};
-use minieap::runtime::App;
-use minieap::VERSION;
+use autheap::cli::Cli;
+use autheap::config::Config;
+use autheap::logging::set_level;
+use autheap::net::{Io, NetIo};
+use autheap::runtime::App;
+use autheap::VERSION;
 
 fn main() -> ExitCode {
     match real_main() {
@@ -26,7 +26,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 列出已编译插件后立即退出（供 LuCI / 脚本枚举；不要求网卡与配置）
     if cli.list_plugins {
-        for (name, desc) in minieap::plugins::available() {
+        for (name, desc) in autheap::plugins::available() {
             println!("{name}\t{desc}");
         }
         return Ok(());
@@ -35,9 +35,9 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg: Config = cli.into_config()?;
 
     set_level(if cfg.verbose >= 2 {
-        minieap::logging::Level::Debug
+        autheap::logging::Level::Debug
     } else {
-        minieap::logging::Level::Info
+        autheap::logging::Level::Info
     });
 
     cfg.validate()?;
@@ -69,21 +69,21 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
     }
 
-    minieap::log_info!("MiniEAP {VERSION} 已启动");
+    autheap::log_info!("AuthEAP {VERSION} 已启动");
     app.run()?;
     Ok(())
 }
 
 fn banner(cfg: &Config) {
-    minieap::log_info!(
-        "MiniEAP {} —— 网卡: {} 后端: {:?} 插件: {:?}",
+    autheap::log_info!(
+        "AuthEAP {} —— 网卡: {} 后端: {:?} 插件: {:?}",
         VERSION,
         cfg.ifname,
         cfg.backend,
         cfg.plugins
     );
     if cfg.plugins.iter().any(|p| p == "rjv3") {
-        minieap::log_info!("锐捷 v3/v4 插件已启用（算法移植自 hyrathb@GitHub / updateing）");
+        autheap::log_info!("锐捷 v3/v4 插件已启用（算法移植自 hyrathb@GitHub / updateing）");
     }
 }
 

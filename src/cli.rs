@@ -21,7 +21,7 @@ pub struct Cli {
     #[arg(short = 'u', long = "username", value_name = "NAME")]
     pub username: Option<String>,
 
-    /// 密码（也可通过环境变量 MINIEAP_PASSWORD 提供）
+    /// 密码（也可通过环境变量 AUTHEAP_PASSWORD 提供）
     #[arg(short = 'p', long = "password", value_name = "PASS")]
     pub password: Option<String>,
 
@@ -40,6 +40,10 @@ pub struct Cli {
     /// 列出本程序已编译进的所有插件（名字与描述）后退出，不做任何认证
     #[arg(long = "list-plugins")]
     pub list_plugins: bool,
+
+    /// printer 插件：把收到的帧也打印到日志
+    #[arg(long = "printer-log-recv")]
+    pub printer_log_recv: bool,
 
     /// 心跳间隔（秒，0 关闭；默认 20）
     #[arg(short = 'e', long = "heartbeat", value_name = "SECS")]
@@ -151,7 +155,10 @@ impl Cli {
         }
         if let Some(v) = self.password {
             cfg.password = v;
+        } else if let Ok(p) = std::env::var("AUTHEAP_PASSWORD") {
+            cfg.password = p;
         } else if let Ok(p) = std::env::var("MINIEAP_PASSWORD") {
+            // 兼容旧环境变量名
             cfg.password = p;
         }
         cfg.backend = match self.backend {
@@ -206,6 +213,7 @@ impl Cli {
             cfg.wait_after_fail_secs = v;
         }
         cfg.daemon = self.daemon;
+        cfg.printer_log_recv = self.printer_log_recv;
         cfg.verbose = self.verbose;
 
         // 若没有显式指定插件但指定了相关锐捷参数，不自动启用（避免意外）

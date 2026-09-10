@@ -88,6 +88,8 @@ pub struct Config {
     pub wait_after_fail_secs: u64,
     // 插件
     pub plugins: Vec<String>,
+    /// printer 插件：是否把“收到的帧”也打印到日志（默认否，避免刷屏）
+    pub printer_log_recv: bool,
     // rjv3 选项
     /// 心跳包间隔（秒）。默认 20；0 表示禁用心跳。
     pub heartbeat_interval: u64,
@@ -120,6 +122,7 @@ impl Default for Config {
             restart_on_logoff: true,
             wait_after_fail_secs: 30,
             plugins: Vec::new(),
+            printer_log_recv: false,
             heartbeat_interval: 20, // 默认心跳间隔（秒），0 表示禁用
             eap_bcast_addr: BcastAddr::Standard,
             dhcp_type: DhcpType::AfterAuth,

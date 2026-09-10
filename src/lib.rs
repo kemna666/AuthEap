@@ -1,4 +1,4 @@
-//! MiniEAP —— 可扩展 802.1x (EAP-MD5) 客户端（Rust 重写版）。
+//! AuthEAP —— 可扩展 802.1x (EAP-MD5) 客户端（Rust 重写版）。
 //!
 //! 本工程是 [updateing/minieap](https://github.com/updateing/minieap)（C 语言）
 //! 的功能等价格移植，采用 Rust 惯用写法重新组织代码结构。

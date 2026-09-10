@@ -1,6 +1,6 @@
-# MiniEAP 插件开发指南
+# AuthEAP 插件开发指南
 
-MiniEAP 的插件（Packet Plugin）与上游 C 版一致：**在认证核心发送一帧之前**，
+AuthEAP 的插件（Packet Plugin）与上游 C 版一致：**在认证核心发送一帧之前**，
 每个插件都有机会修改该帧；**在收到一帧之后**，每个插件都会被通知。
 你可以借此实现自定义的 802.1x 私有算法、调试/统计等任意行为。
 
@@ -61,8 +61,8 @@ m.get_typed::<TrafficStats>("stats");   // 取回具体类型，读取内部统�
 文件 `src/plugins/my_plugin.rs`：
 
 ```rust,ignore
-use minieap::eth_frame::Frame;
-use minieap::plugin::Plugin;
+use autheap::eth_frame::Frame;
+use autheap::plugin::Plugin;
 
 /// 一个“尾随标记”示例：给每个出站帧追加一个 0x55 字节。
 pub struct TailMarker {
@@ -133,6 +133,6 @@ sudo ./target/release/autheap -i eth0 -u <user> -p <pass> --plugin rjv3 --plugin
 
 ## 6. 文档与测试
 
-- `cargo doc --open`：查看 `minieap::plugin` 的 API 文档。
+- `cargo doc --open`：查看 `autheap::plugin` 的 API 文档。
 - `cargo test`：`plugin.rs` 内含管线分发与类型取回的单元测试。
 - 本文件（`docs/plugin-development.md`）即插件文档；如需中英文双语版本可自行扩展。

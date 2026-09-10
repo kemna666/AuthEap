@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::eth_frame::{EapCode, EapolType, Frame, BCAST_STANDARD};
+use crate::eth_frame::{EapCode, EapolType, Frame, BCAST_STANDARD, FRAME_HDR_NO_TYPE};
 use crate::net::Io;
 use crate::packet_builder;
 use crate::plugin::{AuthEvent, PluginManager, SessionHost};
@@ -335,6 +335,15 @@ impl App {
         if let Some(sm) = frame.src_mac() {
             self.server_mac = sm;
         }
+        // 插件（如 rjv3）会解出服务器附带的失败原因并打印；
+        // 这里在 -vv（debug）下把失败帧的原始附加数据也打出来，便于逐字节排查。
+        if frame.buf.len() > FRAME_HDR_NO_TYPE {
+            crate::log_debug!(
+                "失败帧附加数据（{} 字节）: {}",
+                frame.buf.len() - FRAME_HDR_NO_TYPE,
+                crate::util::hex_preview(&frame.buf[FRAME_HDR_NO_TYPE..], 96)
+            );
+        }
         // 先通知插件（rjv3 会借此复位自身状态）
         self.dispatch(&AuthEvent::Failure(frame), false);
 
@@ -353,8 +362,11 @@ impl App {
         }
         // 认证过程中失败
         self.fail_count += 1;
-        if self.fail_count >= self.cfg.max_failures {
+        // max_failures == 0 表示永不放弃，一直重试（便于观察日志 / 等服务器恢复）
+        if self.cfg.max_failures != 0 && self.fail_count >= self.cfg.max_failures {
             crate::log_error!("认证失败 {} 次，已达到指定次数，正在退出……", self.fail_count);
+            crate::log_warn!("排查提示：请确认用户名/密码是否正确，以及服务器是否要求锐捷 v3/v4 插件；");
+            crate::log_warn!("把「最大失败次数」设为 0 可让客户端一直重试而不退出。");
             self.write_auth_state("failed");
             self.shutdown.store(true, Ordering::Relaxed);
         } else {
@@ -440,7 +452,7 @@ impl App {
         let mut sent_count: usize = 0;
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
-                crate::log_info!("MiniEAP 已退出");
+                crate::log_info!("AuthEAP 已退出");
                 return Ok(());
             }
             let now = Instant::now();
@@ -464,7 +476,7 @@ impl App {
             }
             let now = Instant::now();
             if self.process_due_timers(now) {
-                crate::log_info!("MiniEAP 已退出");
+                crate::log_info!("AuthEAP 已退出");
                 return Ok(());
             }
         }

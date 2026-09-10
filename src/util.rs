@@ -2,6 +2,23 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// 生成十六进制预览字符串（最多 `max` 字节，超出部分以 ` …` 结尾）。
+/// 用于把看不懂的服务器附加数据原样打出来，便于对照排查。
+pub fn hex_preview(bytes: &[u8], max: usize) -> String {
+    let n = bytes.len().min(max);
+    let mut s = String::with_capacity(n * 3 + 8);
+    for (i, b) in bytes[..n].iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        s.push_str(&format!("{b:02x}"));
+    }
+    if bytes.len() > n {
+        s.push_str(" …");
+    }
+    s
+}
+
 /// 将单个十六进制字符（0-9a-fA-F）转换为数值。
 pub fn hex_char(c: u8) -> Option<u8> {
     match c {

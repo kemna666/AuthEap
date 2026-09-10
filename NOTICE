@@ -1,4 +1,4 @@
-MiniEAP (Rust) — 第三方代码与致谢
+AuthEAP (Rust) — 第三方代码与致谢
 
 本程序是 https://github.com/updateing/minieap 的 Rust 重写版，遵循 GPL-3.0 许可。
 

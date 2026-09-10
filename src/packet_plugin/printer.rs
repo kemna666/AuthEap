@@ -5,17 +5,20 @@ use crate::log_info;
 use crate::plugin::Plugin;
 
 /// 打印流经帧的插件。
-pub struct Printer;
+pub struct Printer {
+    /// 是否把收到的帧也打印到日志
+    log_recv: bool,
+}
 
 impl Printer {
-    pub fn new() -> Printer {
-        Printer
+    pub fn new(log_recv: bool) -> Printer {
+        Printer { log_recv }
     }
 }
 
 impl Default for Printer {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
@@ -41,6 +44,9 @@ impl Plugin for Printer {
     }
 
     fn on_received(&mut self, frame: &Frame) {
+        if !self.log_recv {
+            return;
+        }
         log_info!("[printer] 收到帧（{} 字节）", frame.buf.len());
     }
 }

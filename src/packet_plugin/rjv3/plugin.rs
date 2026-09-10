@@ -15,7 +15,7 @@ use std::net::IpAddr;
 use crate::config::{BcastAddr, Config, DhcpType};
 use crate::error::{Error, Result};
 use crate::eth_frame::{
-    EapCode, EapType, EapolType, Frame, BCAST_RJ, EAP_CODE, EAPOL_TYPE,
+    EapCode, EapType, EapolType, Frame, BCAST_RJ, EAP_CODE, EAPOL_TYPE, FRAME_HDR_NO_TYPE,
 };
 use crate::log_warn;
 use crate::net::ifinfo;
@@ -256,9 +256,14 @@ impl Rjv3 {
         self.ka_dest = [0; 6];
     }
 
-    /// 每次收到帧时调用：更新 last_recv（供后续 prepare 取种子）。
+    /// 每次收到帧时调用：更新 last_recv（供后续 prepare 取种子），并记下服务器地址（心跳用）。
     pub fn on_frame_received(&mut self, frame: &Frame) {
         self.last_recv = Some(frame.clone());
+        if let Some(sm) = frame.src_mac() {
+            if sm != self.mac && sm != [0xff; 6] {
+                self.ka_dest = sm;
+            }
+        }
     }
 
     // ---------- 协议流程（由 on_auth_event 调用）----------
@@ -323,9 +328,20 @@ impl Rjv3 {
 
     /// 心跳计时到点：构造并发送心跳帧。
     fn send_keepalive(&mut self, host: &mut dyn SessionHost) {
-        if self.echokey == 0 && self.ka_dest == [0u8; 6] {
-            return; // 尚未获得 echo key，无法心跳
+        // 不知道服务器地址时，尝试从最近一帧里取源 MAC
+        if self.ka_dest == [0u8; 6] {
+            if let Some(sm) = self.last_recv.as_ref().and_then(|f| f.src_mac()) {
+                if sm != self.mac && sm != [0xff; 6] {
+                    self.ka_dest = sm;
+                }
+            }
         }
+        if self.ka_dest == [0u8; 6] {
+            crate::log_warn!("尚未获知服务器地址，暂不能发送心跳");
+            return;
+        }
+
+        // 注：部分服务器成功帧里没有 echo key，此时 echokey 为 0，仍尝试发送心跳
         let f = keepalive::build_keepalive_frame(
             self.echokey,
             &mut self.echono,
@@ -490,10 +506,35 @@ impl Rjv3 {
         props
     }
 
+    /// 认证失败时，把服务器在 FAILURE 帧里附带的提示文本显示出来。
+    ///
+    /// 锐捷服务器会在失败帧尾部带上 GBK 编码的原因说明（如“密码错误”“用户不存在”
+    /// “MAC 地址绑定错误”“IP 地址不正确”等）。这里把所有能解出可读文本的字段都打印，
+    /// 解不出时退回打印原始十六进制，保证不会“什么都没说”。
+    pub fn log_server_message(&mut self, frame: &Frame) {
+        let buf = &frame.buf;
+        if buf.len() <= FRAME_HDR_NO_TYPE {
+            crate::log_warn!("认证失败：服务器未附带原因说明（帧内没有附加数据）");
+            return;
+        }
+        let region = &buf[FRAME_HDR_NO_TYPE..];
+        let texts = extract_readable_props(region);
+        if texts.is_empty() {
+            crate::log_warn!(
+                "认证失败：服务器未返回可读提示，原始数据（{} 字节）: {}",
+                region.len(),
+                crate::util::hex_preview(region, 64)
+            );
+            return;
+        }
+        for (prop_type, text) in texts {
+            gbk_log(&format!("服务器提示（字段 0x{prop_type:02x}）"), &text);
+        }
+    }
+
     /// 处理服务器结果（成功/失败帧尾部）：打印服务器通知、解析 echo key。
     /// 返回是否成功找到 echo key（成功时需返回 true）。
-    pub fn process_result(&mut self, frame: &Frame) -> Result<()> {
-        let buf = &frame.buf;
+    pub fn process_result(&mut self, frame: &Frame) -> Result<()> {        let buf = &frame.buf;
         if buf.len() < 22 {
             return Ok(());
         }
@@ -536,10 +577,37 @@ impl Rjv3 {
     }
 }
 
+/// 从服务器报文的附加数据区(`帧首 22 字节之后`)解析出所有可读文本字段，
+/// 返回 `(字段类型, 文本字节)` 列表；解不出任何可读文本时返回空。
+pub fn extract_readable_props(region: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut out = Vec::new();
+    if let Ok(props) = parse_bare(region) {
+        for p in props {
+            let t = trim_trailing_zero(&p.content);
+            if t.len() >= 2 && is_printable_text(t) {
+                out.push((p.prop_type, t.to_vec()));
+            }
+        }
+    }
+    out
+}
+
 /// GBK → UTF-8 后打印（用 encoding_rs）
 pub fn gbk_log(prefix: &str, bytes: &[u8]) {
     let (decoded, _, _) = encoding_rs::GBK.decode(bytes);
     crate::log_info!("{prefix}:\n{decoded}");
+}
+
+/// 去掉尾部的 0 填充（锐捷字段多为定长 + 0 结尾）。
+fn trim_trailing_zero(b: &[u8]) -> &[u8] {
+    let end = b.iter().rposition(|&c| c != 0).map(|i| i + 1).unwrap_or(0);
+    &b[..end]
+}
+
+/// 是否像“可读文本”：不含控制字符（GBK 双字节的低位可能 < 0x20，故按整体判断）。
+fn is_printable_text(b: &[u8]) -> bool {
+    b.iter()
+        .all(|&c| c >= 0x20 || c == b'\t' || c == b'\n' || c == b'\r' || c >= 0x80)
 }
 
 // ============ 把 rjv3 实现为公开的通用 Plugin ============
@@ -572,8 +640,11 @@ impl Plugin for Rjv3 {
     fn on_auth_event(&mut self, ev: &AuthEvent, host: &mut dyn SessionHost) {
         match ev {
             AuthEvent::Success(frame) => self.handle_success(frame, host),
-            AuthEvent::Failure(_frame) => {
-                // 认证失败/被踢下线：清空本插件状态（核心负责重连策略）
+            AuthEvent::Failure(frame) => {
+                // 先把服务器在失败帧里附带的提示文本打出来（锐捷为 GBK，
+                // 常见如“密码错误”“用户不存在”“MAC 地址绑定错误”等），
+                // 再清空本插件状态（核心负责重连策略）。
+                self.log_server_message(frame);
                 self.reset();
             }
             AuthEvent::KeepaliveTick => self.send_keepalive(host),
@@ -620,6 +691,52 @@ mod tests {
         buf[15] = EapolType::EapPacket as u8;
         buf[18] = EapCode::Success as u8;
         Frame { buf }
+    }
+
+    /// 把一段文本按“锐捷字段”格式拼到附加数据区：magic + type + len + 内容 + 0
+    fn prop_region(prop_type: u8, text: &str) -> Vec<u8> {
+        let (gbk, _, _) = encoding_rs::GBK.encode(text);
+        let mut content = gbk.to_vec();
+        content.push(0);
+        let mut region = Vec::new();
+        region.extend_from_slice(&PROP_MAGIC);
+        region.push(prop_type);
+        region.push((content.len() + 2) as u8);
+        region.extend_from_slice(&content);
+        region
+    }
+
+    #[test]
+    fn failure_message_is_extracted_as_gbk() {
+        let region = prop_region(TYPE_ACCOUNTING_MSG, "密码错误");
+        let got = extract_readable_props(&region);
+        assert_eq!(got.len(), 1, "应解析出 1 条可读文本");
+        assert_eq!(got[0].0, TYPE_ACCOUNTING_MSG);
+        let (text, _, _) = encoding_rs::GBK.decode(&got[0].1);
+        assert_eq!(text, "密码错误");
+    }
+
+    #[test]
+    fn binary_payload_is_not_reported_as_text() {
+        // 16 字节 MD5 摘要之类的二进制内容不应被当成“服务器提示”
+        let region = prop_region(TYPE_PWD_HASH, "\u{1}\u{2}\u{3}\u{4}");
+        assert!(extract_readable_props(&region).is_empty());
+    }
+
+    #[test]
+    fn failure_frame_with_message_does_not_panic() {
+        let mut cfg = Config::default();
+        cfg.ifname = "lo".into();
+        let mut rj = Rjv3::new(&cfg, [0xaa; 6]);
+        let mut buf = vec![0u8; FRAME_HDR_NO_TYPE];
+        buf[15] = EapolType::EapPacket as u8;
+        buf[18] = EapCode::Failure as u8;
+        buf.extend_from_slice(&prop_region(TYPE_ACCOUNTING_MSG, "用户不存在"));
+        rj.log_server_message(&Frame { buf });
+        // 空附加数据也不能 panic
+        let mut f = vec![0u8; FRAME_HDR_NO_TYPE];
+        f[18] = EapCode::Failure as u8;
+        rj.log_server_message(&Frame { buf: f });
     }
 
     #[test]

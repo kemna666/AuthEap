@@ -4,7 +4,10 @@ config autheap-client 'main'
 	option username ''
 	option password ''
 	option backend 'raw'
-	list plugins 'rjv3'          # 启用的插件（可多个；需已编译进客户端）
+	option plugin_rjv3 '1'
+	option plugin_printer '0'
+	option plugin_stats '0'
+	option extra_plugins ''          # 额外插件名（空格/逗号分隔，需已编译进客户端）
 	option heartbeat '20'
 	option eap_bcast_addr '0'
 	option dhcp_type '2'

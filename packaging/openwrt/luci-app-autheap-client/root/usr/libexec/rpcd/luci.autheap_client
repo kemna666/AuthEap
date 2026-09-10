@@ -8,6 +8,9 @@
 . /usr/share/libubox/jshn.sh
 
 CONF='autheap-client'
+LOG_FILE='/var/log/autheap-client.log'
+LOG_MAX_CHUNK=16384        # 单次最多返回 16KB
+LOG_SKIP_CHUNK=32768       # 落后超过 32KB 则跳到尾部（防止网页卡顿）
 
 # ---------- 读取辅助 ----------
 getval() { # getval <option> <default>
@@ -66,7 +69,7 @@ do_set() {
 		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$nv" ] || { uci set "$CONF.main.$k=$nv"; changed=1; }
 	done
 	# 字符串字段：显式提交即写入（含清空为 "" 的情况，避免旧值残留）；缺失的键不动
-	for k in ifname username backend extra_plugins dhcp_script service version_str fake_dns1 fake_dns2 fake_serial; do
+	for k in ifname username password backend extra_plugins dhcp_script service version_str fake_dns1 fake_dns2 fake_serial; do
 		json_get_type _t "$k"
 		[ "$_t" = "string" ] || continue
 		json_get_var v "$k"
@@ -95,7 +98,14 @@ do_status() {
 	json_add_boolean enabled "$(bval enabled 0)"
 	json_add_boolean running "$(pidof autheap >/dev/null 2>&1 && echo 1 || echo 0)"
 	json_add_string auth "$([ -f /var/run/autheap-client.auth ] && cat /var/run/autheap-client.auth 2>/dev/null || echo unknown)"
+	local pkgver binver
+	pkgver="$(sed -n 's/^Version: //p' /usr/lib/opkg/info/AuthEAP-Client.control 2>/dev/null | head -n1)"
+	binver="$(/usr/bin/autheap --version 2>/dev/null | awk '{print $NF}')"
+	json_add_string version "${pkgver:-$binver}"
+	json_add_string core "${binver:-unknown}"
 	json_add_string username "$(getval username '')"
+	# 密码长度：只暴露长度不暴露内容，便于判断“LuCI 里改了密码但启动时用的还是旧值”
+	json_add_int pwdlen "$(getval password '' | wc -c)"
 	json_add_string ifname   "$(getval ifname eth0)"
 	json_add_object plugins
 		local p rjv3 printer stats extra plugins
@@ -124,9 +134,46 @@ do_status() {
 		json_add_boolean stats "$stats"
 		json_add_string  extra "$extra"
 	json_close_object
-	local log=''
-	[ -s /var/log/autheap-client.log ] && log="$(tail -c 4096 /var/log/autheap-client.log 2>/dev/null)"
-	json_add_string log "$log"
+	# 兼容字段：旧版前端（浏览器可能仍缓存旧 JS）读的是这个字段，
+	# 新前端改用增量接口 log，不再使用它。保留可避免“升级后日志空白”。
+	local clog=''
+	[ -s "$LOG_FILE" ] && clog="$(tail -c 2048 "$LOG_FILE" 2>/dev/null)"
+	json_add_string log "$clog"
+	json_dump
+	json_cleanup
+}
+
+# ---------- 方法: log（增量流式读日志）----------
+# 入参: {"offset": <已读字节数>}；出参: {offset, size, data}。
+# 只返回 offset 之后的新增内容，避免每次重复传输整段日志。
+do_log() {
+	local off='' size='' data='' f="$LOG_FILE"
+	json_load "$1"
+	json_get_var off offset
+	case "$off" in ''|*[!0-9]*) off=0 ;; esac
+	if [ ! -f "$f" ]; then
+		json_init
+		json_add_int offset 0
+		json_add_int size 0
+		json_add_string data ''
+		json_dump; json_cleanup
+		return
+	fi
+	size="$(wc -c < "$f" 2>/dev/null | tr -dc '0-9')"
+	[ -n "$size" ] || size=0
+	# 日志被截断/轮转（新启动会清空）或落后太多 → 重新定位
+	[ "$size" -lt "$off" ] && off=0
+	[ $((size - off)) -gt "$LOG_SKIP_CHUNK" ] && off=$((size - LOG_MAX_CHUNK))
+	[ $((size - off)) -gt "$LOG_MAX_CHUNK" ] && off=$((size - LOG_MAX_CHUNK))
+	if [ "$size" -gt "$off" ]; then
+		data="$(tail -c "+$((off + 1))" "$f" 2>/dev/null)"
+	else
+		off="$size"
+	fi
+	json_init
+	json_add_int offset "$size"
+	json_add_int size "$size"
+	json_add_string data "$data"
 	json_dump
 	json_cleanup
 }
@@ -177,7 +224,7 @@ EOF
 case "$1" in
 "list")
 	json_init
-	for m in get_config set_config list_interfaces list_plugins status control; do
+	for m in get_config set_config list_interfaces list_plugins status log control; do
 		json_add_object "$m"
 		json_close_object
 	done
@@ -208,6 +255,10 @@ case "$1" in
 		status)
 			read -r _input
 			do_status
+			;;
+		log)
+			read -r input
+			do_log "$input"
 			;;
 		control)
 			read -r input

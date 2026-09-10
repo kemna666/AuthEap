@@ -76,7 +76,7 @@ pub fn open_backend(backend: Backend, ifname: &str, promisc: bool) -> Result<Box
 
 fn spawn_reader(backend: Arc<dyn FrameBackend>, tx: Sender<Vec<u8>>, stop: Arc<AtomicBool>) {
     std::thread::Builder::new()
-        .name("minieap-recv".into())
+        .name("autheap-recv".into())
         .spawn(move || {
             let mut buf = vec![0u8; 2048];
             while !stop.load(Ordering::Relaxed) {
