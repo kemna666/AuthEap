@@ -1,8 +1,8 @@
-# AuthEAP（Rust 重写版）
+# AuthEAP
 
 可扩展的 802.1x (EAP-MD5) 客户端，带 **锐捷 v3/v4** 私有算法插件支持。
 本工程是 [updateing/minieap](https://github.com/updateing/minieap)（C 语言）的
-**功能等价格移植**，采用 Rust 惯用写法重新组织，目标平台 Linux
+**Rust重写版本**，采用 Rust 惯用写法重新组织，目标平台 Linux
 
 > ⚠️ 本程序涉及校园网认证客户端领域，仅用于学习研究与你拥有使用授权的网络。
 > 由于锐捷 v3/v4 算法来自逆向工程，请遵守当地网络使用规定。
@@ -226,28 +226,6 @@ sudo autheap -i eth0 -u 学号 -p 密码 --plugin rjv3 --plugin beacon \
 # 追加一条自定义字段 0x6a
 --rj-option 6a:000102
 ```
-
-## 测试
-
-```bash
-cargo test
-```
-
-哈希移植的参考向量由原版 C 代码（`rjmd5.c`/`rjsha1.c`/`rjripemd128.c`/
-`rjtiger.c`/`rjwhirlpool.c`/`checkV4.c`）编译生成后内嵌到各单元测试中，
-因此可以脱离校园网在任意机器上验证算法保真度。
-
-
-## 与上游的差异（重构说明）
-
-| 原版 C | 本 Rust 版 |
-| --- | --- |
-| 模块化 `*.c` + `make` | Cargo 模块 + feature |
-| `config.mk` 选模块 | 运行时 `--plugin` / `--backend`，编译时 feature 选 pcap |
-| `-u myname` 粘连参数 | clap 标准参数 |
-| getopt / iconv / 手写日志 | clap / `encoding_rs`(GBK) / 轻量日志 |
-| 全局单例 + 回调 | 所有权清晰的 `App` 状态机 + 定时器 |
-| 三种后端(sockraw/libpcap/bpf) | `raw`(AF_PACKET) + `pcap`(feature) |
 
 ## 致谢与许可
 
