@@ -3,12 +3,12 @@
 #
 # 用法:
 #   build-apk.sh --arch aarch64 \
-#                [--version 0.1.0] [--release 1] \
+#                [--version 0.1.16] [--release 1] \
 #                [--binary staging/autheap]
 # 输出: staging/AuthEAP-Client-<version>-r<release>.apk
 #
 # 设备端安装（未签名包）:
-#   apk add --allow-untrusted AuthEAP-Client-0.1.0-r1.apk
+#   apk add --allow-untrusted AuthEAP-Client-0.1.16-r1.apk
 set -eu
 . "$(dirname "$0")/common.sh"
 
@@ -39,12 +39,16 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # 组装数据文件（与 ipk 相同的安装布局）
-mkdir -p "$WORK/pkg/usr/bin" "$WORK/pkg/etc/init.d" "$WORK/pkg/etc/config"
+mkdir -p "$WORK/pkg/usr/bin" "$WORK/pkg/etc/init.d" "$WORK/pkg/etc/config" \
+         "$WORK/pkg/usr/libexec/autheap-client"
 cp "$BINARY" "$WORK/pkg/usr/bin/autheap"
 cp "$FILES_ROOT/etc/init.d/autheap-client" "$WORK/pkg/etc/init.d/autheap-client"
 cp "$FILES_ROOT/etc/config/autheap-client"  "$WORK/pkg/etc/config/autheap-client"
+cp "$FILES_ROOT/usr/libexec/autheap-client/gen-config" \
+   "$WORK/pkg/usr/libexec/autheap-client/gen-config"
 chmod 0755 "$WORK/pkg/usr/bin/autheap"
 chmod 0755 "$WORK/pkg/etc/init.d/autheap-client"
+chmod 0755 "$WORK/pkg/usr/libexec/autheap-client/gen-config"
 chmod 0600 "$WORK/pkg/etc/config/autheap-client"
 
 # .PKGINFO（apk v2 格式；加 depend 可在此处追加多行）

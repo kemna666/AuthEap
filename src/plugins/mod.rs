@@ -28,6 +28,7 @@
 //!
 //! 完整教程见 `docs/plugin-development.md`。
 
+pub mod beacon;
 pub mod example;
 pub mod report;
 
@@ -50,6 +51,8 @@ pub fn create(name: &str, cfg: &Config, mac: [u8; 6]) -> Option<Box<dyn Plugin>>
         "stats" | "example" => Some(Box::new(example::TrafficStats::default())),
         // 如实上报本机真实信息的独立插件（不改帧、不伪造状态）
         "report" => Some(Box::new(report::Report::new(cfg, mac))),
+        // 周期性向指定 IP:端口 发送自定义 TCP 数据包（目标/间隔/载荷可配置）
+        "beacon" => Some(Box::new(beacon::Beacon::new(cfg))),
         // ============ 在此加入你自己的插件 ============
         // "my-plugin" => Some(Box::new(my_plugin::MyPlugin)),
         _ => None,
@@ -62,7 +65,7 @@ pub fn build_manager(cfg: &Config, mac: [u8; 6], names: &[String]) -> PluginMana
     for n in names {
         match create(n, cfg, mac) {
             Some(p) => m.add_box(p),
-            None => crate::log_warn!("未知插件名: {n}，已忽略（可用 --plugin printer / stats / report / rjv3）"),
+            None => crate::log_warn!("未知插件名: {n}，已忽略（可用 --plugin printer / stats / report / beacon / rjv3）"),
         }
     }
     m
@@ -79,5 +82,6 @@ pub fn available() -> Vec<(&'static str, &'static str)> {
         ("printer", "打印流经本插件的报文大小"),
         ("stats", "统计认证期间收发报文数量与字节数（示例插件）"),
         ("report", "如实上报本机真实信息（网卡/MAC/IP/网关/DNS/主机名）与收发计数；不改帧、不伪造状态"),
+        ("beacon", "周期性向指定 IP:端口 发送自定义 TCP 数据包（间隔/目标/载荷可在 LuCI 调整）"),
     ]
 }

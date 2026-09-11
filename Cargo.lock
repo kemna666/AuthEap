@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "autheap"
-version = "2026.9.9"
+version = "0.1.16"
 dependencies = [
  "clap",
  "encoding_rs",

@@ -7,6 +7,17 @@
 
 ```bash
 sudo autheap -i eth0 -u 学号 -p 密码 --plugin rjv3
+
+# 用配置文件（推荐把一长串参数写进文件）
+sudo autheap --config /etc/autheap-client.conf
+
+# 日志：追加写入、实时刷新，并自动轮转清理（超过 256KB 轮转，保留 3 份）
+sudo autheap -i eth0 -u 学号 -p 密码 --plugin rjv3 \
+     --log-file /var/log/autheap.log --log-max-kb 256 --log-keep 3 --log-rotate-secs 300
+
+# beacon 插件：每 60 秒向指定 IP:端口 发送一段自定义 TCP 载荷
+sudo autheap -i eth0 -u 学号 -p 密码 --plugin rjv3 --plugin beacon \
+     --beacon-dst ip --beacon-port port --beacon-interval 60
 ```
 
 支持两种安装方式：
@@ -34,7 +45,7 @@ packaging/desktop/
 ./packaging/desktop/build-deb.sh
 
 # 2) 安装（apt 会自动处理依赖；dpkg -i 亦可）
-sudo apt install ./packaging/desktop/out/autheap_0.1.0-1_amd64.deb
+sudo apt install ./packaging/desktop/out/autheap_0.1.3-1_amd64.deb
 
 # 3) 直接命令行启动（raw 后端需 root）
 sudo autheap -i eth0 -u 学号 -p 密码 --plugin rjv3

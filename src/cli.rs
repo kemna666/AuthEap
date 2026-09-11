@@ -2,15 +2,15 @@
 
 use clap::{ArgAction, Parser};
 
-use crate::config::{Backend, BcastAddr, Config, DhcpType, RjOption};
+use crate::config::{parse_rj_option, Backend, BcastAddr, Config, DhcpType};
 use crate::util::hex_str_to_bytes;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "autheap",
-    version,
+    version = crate::VERSION,
     about = "可扩展的 802.1x (EAP-MD5) 客户端（带锐捷 v3/v4 插件）—— Rust 版",
-    after_help = "示例:\n  autheap -i eth0 -u 学号 -p 密码 --plugin rjv3\n  autheap -i en0 -u user -p pass --plugin rjv3 --dhcp-type double --dhcp-script 'dhclient en0'\n\n启用 pcap 后端需在编译时加 --features backend-pcap 并安装 libpcap。"
+    after_help = "示例:\n  autheap -i eth0 -u 学号 -p 密码 --plugin rjv3\n  autheap -i en0 -u user -p pass --plugin rjv3 --dhcp-type double --dhcp-script 'dhclient en0'\n  autheap --config /etc/autheap-client.conf --log-file /var/log/autheap-client.log\n  autheap -i eth0 -u u -p p --plugin rjv3 --plugin beacon \\\n          --beacon-dst 203.0.113.10 --beacon-port 8083 --beacon-interval 60 \\\n          --beacon-payload 00112233deadbeef\n\n启用 pcap 后端需在编译时加 --features backend-pcap 并安装 libpcap。"
 )]
 pub struct Cli {
     /// 网络接口
@@ -26,8 +26,28 @@ pub struct Cli {
     pub password: Option<String>,
 
     /// 收发包后端：raw（Linux 原生 AF_PACKET）或 pcap
-    #[arg(short = 'b', long = "backend", value_enum, default_value = "raw")]
-    pub backend: BackendArg,
+    #[arg(short = 'b', long = "backend", value_enum)]
+    pub backend: Option<BackendArg>,
+
+    /// 从配置文件读取认证参数（key = value；命令行显式参数优先）
+    #[arg(short = 'c', long = "config", value_name = "FILE")]
+    pub config: Option<String>,
+
+    /// 把日志追加写入该文件（立即 flush；守护模式下也不会丢日志）
+    #[arg(long = "log-file", value_name = "FILE")]
+    pub log_file: Option<String>,
+
+    /// 单个日志文件大小上限（KB，默认 256）；超过则自动轮转清理
+    #[arg(long = "log-max-kb", value_name = "KB")]
+    pub log_max_kb: Option<u64>,
+
+    /// 保留的历史日志份数（默认 3；0 表示超限直接清空）
+    #[arg(long = "log-keep", value_name = "N")]
+    pub log_keep: Option<usize>,
+
+    /// 日志检查/自动清理间隔（秒，默认 300）
+    #[arg(long = "log-rotate-secs", value_name = "SECS")]
+    pub log_rotate_secs: Option<u64>,
 
     /// 混杂模式
     #[arg(long = "promisc")]
@@ -40,6 +60,10 @@ pub struct Cli {
     /// 列出本程序已编译进的所有插件（名字与描述）后退出，不做任何认证
     #[arg(long = "list-plugins")]
     pub list_plugins: bool,
+
+    /// 网络测试：检查本机网络/网关/目标连通性后退出（不需要账号；可写 HOST 或 HOST:端口，留空只测本机与默认网关）
+    #[arg(long = "nettest", value_name = "HOST[:PORT]", num_args = 0..=1, default_missing_value = "")]
+    pub nettest: Option<String>,
 
     /// printer 插件：把收到的帧也打印到日志
     #[arg(long = "printer-log-recv")]
@@ -85,6 +109,22 @@ pub struct Cli {
     #[arg(long = "fake-serial", value_name = "STR")]
     pub fake_serial: Option<String>,
 
+    /// beacon 插件：目标 IP / 主机名（必填；在 LuCI 里填目标 IP 即启用）
+    #[arg(long = "beacon-dst", value_name = "IP")]
+    pub beacon_dst: Option<String>,
+
+    /// beacon 插件：目标端口（默认 8083）
+    #[arg(long = "beacon-port", value_name = "PORT")]
+    pub beacon_port: Option<u16>,
+
+    /// beacon 插件：发送间隔秒数（默认 60；0 禁用）
+    #[arg(long = "beacon-interval", value_name = "SECS")]
+    pub beacon_interval: Option<u64>,
+
+    /// beacon 插件：载荷十六进制（默认使用内置抓包示例载荷）
+    #[arg(long = "beacon-payload", value_name = "HEX")]
+    pub beacon_payload: Option<String>,
+
     /// 二次认证等待 DHCP 允许的超时次数
     #[arg(long = "max-dhcp-count", value_name = "NUM")]
     pub max_dhcp_count: Option<usize>,
@@ -117,6 +157,10 @@ pub struct Cli {
     #[arg(long = "daemon")]
     pub daemon: bool,
 
+    /// 单实例锁文件（认证进程只允许一个实例在跑；传空字符串表示不做限制）
+    #[arg(long = "pid-file", value_name = "PATH", default_missing_value = "")]
+    pub pid_file: Option<String>,
+
     /// 日志级别（可重复，越多越详细）
     #[arg(short = 'v', action = ArgAction::Count)]
     pub verbose: u8,
@@ -128,24 +172,20 @@ pub enum BackendArg {
     Pcap,
 }
 
-fn parse_dhcp_type(s: &str) -> Option<DhcpType> {
-    match s.to_ascii_lowercase().as_str() {
-        "none" | "0" => Some(DhcpType::None),
-        "double" | "doubleauth" | "1" => Some(DhcpType::DoubleAuth),
-        "after" | "afterauth" | "2" => Some(DhcpType::AfterAuth),
-        "before" | "beforeauth" | "3" => Some(DhcpType::BeforeAuth),
-        _ => None,
-    }
-}
-
 impl Cli {
     pub fn parse_args() -> Cli {
         Cli::parse()
     }
 
-    /// 转换为运行配置
+    /// 转换为运行配置。
+    ///
+    /// 优先级：命令行显式参数 > 配置文件 > 环境变量 > 内置默认值。
     pub fn into_config(self) -> Result<Config, String> {
-        let mut cfg = Config::default();
+        // 先读配置文件（若有），后面再用命令行显式参数覆盖
+        let mut cfg = match self.config.as_deref() {
+            Some(p) if !p.trim().is_empty() => Config::load_file(p)?,
+            _ => Config::default(),
+        };
 
         if let Some(v) = self.ifname {
             cfg.ifname = v;
@@ -155,17 +195,35 @@ impl Cli {
         }
         if let Some(v) = self.password {
             cfg.password = v;
-        } else if let Ok(p) = std::env::var("AUTHEAP_PASSWORD") {
-            cfg.password = p;
-        } else if let Ok(p) = std::env::var("MINIEAP_PASSWORD") {
-            // 兼容旧环境变量名
-            cfg.password = p;
+        } else if cfg.password.is_empty() {
+            // 配置文件没有密码时，才回退到环境变量（兼容旧用法）
+            if let Ok(p) = std::env::var("AUTHEAP_PASSWORD") {
+                cfg.password = p;
+            } else if let Ok(p) = std::env::var("MINIEAP_PASSWORD") {
+                cfg.password = p;
+            }
         }
-        cfg.backend = match self.backend {
-            BackendArg::Raw => Backend::Raw,
-            BackendArg::Pcap => Backend::Pcap,
-        };
-        cfg.plugins = self.plugins;
+        if let Some(b) = self.backend {
+            cfg.backend = match b {
+                BackendArg::Raw => Backend::Raw,
+                BackendArg::Pcap => Backend::Pcap,
+            };
+        }
+        if let Some(v) = self.log_file {
+            cfg.log_file = if v.trim().is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = self.log_max_kb {
+            cfg.log_max_kb = v;
+        }
+        if let Some(v) = self.log_keep {
+            cfg.log_keep = v;
+        }
+        if let Some(v) = self.log_rotate_secs {
+            cfg.log_rotate_secs = v;
+        }
+        if !self.plugins.is_empty() {
+            cfg.plugins = self.plugins;
+        }
         if let Some(v) = self.heartbeat {
             cfg.heartbeat_interval = v;
         }
@@ -173,7 +231,7 @@ impl Cli {
             cfg.eap_bcast_addr = BcastAddr::from_u8(v);
         }
         if let Some(v) = self.dhcp_type {
-            cfg.dhcp_type = parse_dhcp_type(&v).ok_or_else(|| {
+            cfg.dhcp_type = DhcpType::parse(&v).ok_or_else(|| {
                 format!("无法识别的 --dhcp-type: {v}（可用 none/double/after/before 或 0-3）")
             })?;
         }
@@ -189,9 +247,15 @@ impl Cli {
         if let Some(v) = self.version_str {
             cfg.ver_str = v;
         }
-        cfg.fake_dns1 = self.fake_dns1;
-        cfg.fake_dns2 = self.fake_dns2;
-        cfg.fake_serial = self.fake_serial;
+        if self.fake_dns1.is_some() {
+            cfg.fake_dns1 = self.fake_dns1;
+        }
+        if self.fake_dns2.is_some() {
+            cfg.fake_dns2 = self.fake_dns2;
+        }
+        if self.fake_serial.is_some() {
+            cfg.fake_serial = self.fake_serial;
+        }
         if let Some(v) = self.max_dhcp_count {
             cfg.max_dhcp_count = v;
         }
@@ -212,40 +276,52 @@ impl Cli {
         if let Some(v) = self.wait_after_fail {
             cfg.wait_after_fail_secs = v;
         }
-        cfg.daemon = self.daemon;
-        cfg.printer_log_recv = self.printer_log_recv;
-        cfg.verbose = self.verbose;
+        if let Some(v) = self.beacon_dst {
+            cfg.beacon_dst = if v.trim().is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = self.beacon_port {
+            cfg.beacon_port = v;
+        }
+        if let Some(v) = self.beacon_interval {
+            cfg.beacon_interval = v;
+        }
+        if let Some(v) = self.beacon_payload {
+            if v.trim().is_empty() {
+                cfg.beacon_payload = None;
+            } else {
+                cfg.beacon_payload = Some(
+                    hex_str_to_bytes(&v).ok_or_else(|| format!("--beacon-payload 不是合法十六进制: {v}"))?,
+                );
+            }
+        }
+        if self.daemon {
+            cfg.daemon = true;
+        }
+        // 单实例锁文件：显式传空字符串表示不做单实例限制
+        if let Some(p) = self.pid_file.as_deref() {
+            cfg.pid_file = if p.trim().is_empty() {
+                None
+            } else {
+                Some(p.trim().to_string())
+            };
+        }
+        if self.printer_log_recv {
+            cfg.printer_log_recv = true;
+        }
+        if self.verbose > 0 {
+            cfg.verbose = self.verbose;
+        }
 
-        // 若没有显式指定插件但指定了相关锐捷参数，不自动启用（避免意外）
-        if cfg.username.is_empty()
+        // 若既没有命令行参数也没有配置文件，则提示用法（真正的字段校验交给 validate）
+        if self.config.is_none()
+            && cfg.username.is_empty()
             && cfg.password.is_empty()
             && cfg.ifname.is_empty()
             && cfg.plugins.is_empty()
             && cfg.rj_options.is_empty()
         {
-            return Err("未提供任何认证参数（-u/-p/-i）。请用 --help 查看用法。".into());
+            return Err("未提供任何认证参数（-u/-p/-i）或配置文件（--config）。请用 --help 查看用法。".into());
         }
         Ok(cfg)
     }
-}
-
-/// 解析 --rj-option：type:hex[:r]
-fn parse_rj_option(s: &str) -> Result<RjOption, String> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() < 2 || parts.len() > 3 {
-        return Err(format!("--rj-option 格式应为 type:hex[:r]，实际: {s}"));
-    }
-    let t = u8::from_str_radix(parts[0], 16)
-        .map_err(|_| format!("--rj-option 的 type 不是十六进制: {}", parts[0]))?;
-    let content = hex_str_to_bytes(parts[1])
-        .ok_or_else(|| format!("--rj-option 的 value 不是合法十六进制: {}", parts[1]))?;
-    let replace = parts.len() == 3 && parts[2] == "r";
-    if parts.len() == 3 && !replace {
-        return Err(format!("--rj-option 第三段只能是 r: {s}"));
-    }
-    Ok(RjOption {
-        prop_type: t,
-        content,
-        replace,
-    })
 }

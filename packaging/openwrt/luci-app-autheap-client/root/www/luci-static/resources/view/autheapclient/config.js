@@ -11,11 +11,17 @@ var callListPlugins = rpc.declare({
 	expect: {}
 });
 
+// 注意：LuCI 的 `expect` 只取【第一个键】且类型不符就用默认值；
+// 这里要用整个返回对象，所以不写 expect。
+// 另外必须声明 params（按位置映射），否则传入的参数会被丢弃。
 var callControl = rpc.declare({
 	object: 'luci.autheap_client',
 	method: 'control',
-	expect: { res: true }
+	params: [ 'action' ]
 });
+
+// 若报 “Access denied”，通常是升级了 luci 包但 ACL 还没生效（rpcd 未重启 / 会话缓存旧 ACL）
+var ACL_HINT = '（若提示 Access denied：请在设备上执行 /etc/init.d/rpcd restart 并重新登录 LuCI，再 Ctrl+F5 强刷）';
 
 return view.extend({
 	load: function () {
@@ -44,6 +50,16 @@ return view.extend({
 					if (legacy.length)
 						uci.set('autheap-client', 'main', 'plugins', legacy);
 				}
+
+				// 同步旧布尔位（plugin_rjv3/printer/stats）与插件列表：
+				// 以前把列表清空后，gen-config 会回退到这些布尔值（plugin_rjv3 默认 1），
+				// 于是插件“删不掉”。现在保存时会把两者写成一致。
+				var cur = uci.get('autheap-client', 'main', 'plugins') || [];
+				cur = String(cur).split(/[\s,]+/).filter(function (n) { return n; });
+				[ [ 'plugin_rjv3', 'rjv3' ], [ 'plugin_printer', 'printer' ], [ 'plugin_stats', 'stats' ] ]
+					.forEach(function (kv) {
+						uci.set('autheap-client', 'main', kv[0], cur.indexOf(kv[1]) >= 0 ? '1' : '0');
+					});
 			});
 	},
 
@@ -54,15 +70,22 @@ return view.extend({
 		var m = new form.Map('autheap-client', 'AuthEAP-Client',
 			names ? ('可用插件：' + names) : '启用认证所需的插件');
 
-		var s = m.section(form.NamedSection, 'main', 'autheap-client', '认证设置');
+		// 分 Tab 显示：LuCI 的 form 支持 tabbed —— 每个 section 的【类型】即 tab 标识，
+		// 【标题】即 tab 名称；各插件/功能的设置放在各自的 Tab 里。
+		m.tabbed = true;
 
-		var o;
+		var sBasic   = m.section(form.NamedSection, 'main', 'basic',   '基本设置');
+		var sPlugins = m.section(form.NamedSection, 'main', 'plugins', '插件');
+		var sRjv3    = m.section(form.NamedSection, 'main', 'rjv3',    'rjv3 锐捷',
+			'锐捷 v3/v4 插件参数：心跳、DHCP、服务名/版本串、伪造字段等');
+		var sBeacon  = m.section(form.NamedSection, 'main', 'beacon',  'beacon 保活');
+		var sLog     = m.section(form.NamedSection, 'main', 'log',     '日志');
+
+		var s = sBasic, o;
 
 		o = s.option(form.Flag, 'enabled', '开机自启（系统启动时自动运行）');
 
 		o = s.option(form.Flag, 'daemon', '后台运行（守护模式；不交给 procd 托管，停止用 killall）');
-
-		o = s.option(form.Flag, 'printer_log_recv', 'printer 插件：把收到的帧也打印到日志');
 
 		o = s.option(widgets.DeviceSelect, 'ifname', '认证网卡（设备名，可从下拉选择或手动输入）');
 		o.noaliases = true;
@@ -77,8 +100,56 @@ return view.extend({
 		o.value('raw', 'raw (AF_PACKET)');
 		o.value('pcap', 'pcap (需 feature)');
 
+		// ================= Tab: 插件 =================
+		s = sPlugins;
+
 		o = s.option(form.DynamicList, 'plugins', '启用插件（逐行添加/删除）',
 			'输入要启用的插件名后回车或点“添加”；已启用项点 ✕ 移除。可用：' + names);
+
+		o = s.option(form.Flag, 'printer_log_recv', 'printer 插件：把收到的帧也打印到日志');
+
+		// ================= Tab: beacon 保活 =================
+		// 周期性向指定 IP:端口 发送自定义 TCP 数据包；填了目标 IP + 载荷即自动启用
+		s = sBeacon;
+
+		o = s.option(form.Value, 'beacon_dst', '目标 IP / 主机名（填了就自动启用 beacon 插件）');
+		o.placeholder = '例如 203.0.113.10';
+		o.rmempty = true;
+
+		o = s.option(form.Value, 'beacon_port', '目标端口（默认 8083）');
+		o.datatype = 'port';
+		o.placeholder = '8083';
+
+		o = s.option(form.Value, 'beacon_interval', '发送间隔（秒；0 = 禁用）');
+		o.datatype = 'uinteger';
+		o.placeholder = '60';
+
+		o = s.option(form.Value, 'beacon_payload', '载荷（十六进制；留空使用内置默认载荷）');
+		o.placeholder = '留空 = 内置默认；如需覆盖请粘贴抓包 Data（偶数长度十六进制）';
+		o.rmempty = true;
+
+		// ================= Tab: 日志 =================
+		// 实时刷新 + 按大小自动轮转清理
+		s = sLog;
+
+		o = s.option(form.Value, 'log_file', '日志文件（后端写入该文件）');
+		o.placeholder = '/var/log/autheap-client.log';
+		o.rmempty = true;
+
+		o = s.option(form.Value, 'log_max_kb', '日志大小上限（KB；超过就自动轮转清理）');
+		o.datatype = 'uinteger';
+		o.placeholder = '256';
+
+		o = s.option(form.Value, 'log_keep', '保留历史日志份数（.1/.2…；0 = 不保留）');
+		o.datatype = 'uinteger';
+		o.placeholder = '3';
+
+		o = s.option(form.Value, 'log_rotate_secs', '日志检查/自动清理间隔（秒）');
+		o.datatype = 'uinteger';
+		o.placeholder = '300';
+
+		// ================= Tab: rjv3 锐捷 =================
+		s = sRjv3;
 
 		o = s.option(form.Value, 'heartbeat', '心跳间隔（秒，0 关闭）');
 		o.datatype = 'uinteger';
@@ -102,6 +173,10 @@ return view.extend({
 
 		o = s.option(form.Value, 'max_dhcp_count', '二次认证等待 DHCP 次数上限');
 		o.datatype = 'uinteger';
+
+		// ================= Tab: 基本设置（续）=================
+		s = sBasic;
+
 		o = s.option(form.Value, 'max_retries', '阶段最大重试次数');
 		o.datatype = 'uinteger';
 		o = s.option(form.Value, 'max_failures', '最大连续失败次数');
@@ -116,9 +191,9 @@ return view.extend({
 	handleSaveApply: function (ev, mode) {
 		var Fn = L.bind(function () {
 			var enabled = (uci.get('autheap-client', 'main', 'enabled') == '1');
-			callControl({ action: enabled ? 'enable' : 'disable' })
+			callControl(enabled ? 'enable' : 'disable')
 				.then(function () {
-					return callControl({ action: enabled ? 'restart' : 'stop' });
+					return callControl(enabled ? 'restart' : 'stop');
 				})
 				.catch(function () {});
 			document.removeEventListener('uci-applied', Fn);

@@ -1,0 +1,117 @@
+# Forgejo Actions —— 发布流水线（自托管 runner 时使用）
+#
+# Codeberg 请优先用仓库根目录的 `.woodpecker.yml`（Codeberg 不托管 Forgejo Actions）。
+#
+# 触发：
+#   - 推送 tag（如 0.1.2）：以 tag 作为版本号并发布；
+#   - 手动触发（workflow_dispatch）：版本号对远端最大版本自动 +1 后发布
+#     —— 即“每发布一个版本依次递增”，无需手工改 Cargo.toml。
+#
+# 前置：仓库 Secret `RELEASE_TOKEN`（Forgejo 访问令牌，需 write:repository 权限）。
+name: Release
+
+on:
+  push:
+    tags: [ '*.*.*' ]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: '版本号递增级别（patch / minor / major）'
+        default: patch
+
+jobs:
+  # ---------- 计算版本号（整条流水线共用）----------
+  version:
+    runs-on: docker
+    container:
+      image: rust:1-bookworm
+    outputs:
+      version: ${{ steps.calc.outputs.version }}
+    steps:
+      - name: 安装工具
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl
+
+      - uses: actions/checkout@v4
+
+      - name: 计算版本号
+        id: calc
+        env:
+          BUMP_LEVEL: ${{ inputs.bump }}
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          V="$(./scripts/ci-version.sh)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "本次版本号: $V"
+
+  # ---------- 交叉编译 + 打包 + 上传 Release 附件 ----------
+  openwrt:
+    runs-on: docker
+    container:
+      image: rust:1-bookworm
+    needs: [ version ]
+    strategy:
+      fail-fast: false
+      max-parallel: 1          # 串行，避免并发创建同一个 Release
+      matrix:
+        include:
+          - triple: x86_64-unknown-linux-musl
+            ipk_arch: x86_64
+            apk_arch: x86_64
+          - triple: aarch64-unknown-linux-musl
+            ipk_arch: aarch64_cortex-a53
+            apk_arch: aarch64_cortex-a53
+          - triple: mipsel-unknown-linux-musl
+            ipk_arch: mipsel_24kc
+            apk_arch: mipsel_24kc
+    steps:
+      - name: 安装交叉编译依赖
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl file
+          if [ "${{ matrix.triple }}" = "aarch64-unknown-linux-musl" ]; then
+            apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          fi
+          rustup component add rust-src
+
+      - uses: actions/checkout@v4
+
+      - name: 交叉编译 + 打包 + 发布
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          ./scripts/ci-build-package.sh \
+            "${{ matrix.triple }}" "${{ matrix.ipk_arch }}" "${{ matrix.apk_arch }}"
+
+  # ---------- LuCI 界面包 + 桌面 deb ----------
+  luci-desktop:
+    runs-on: docker
+    container:
+      image: rust:1-bookworm
+    needs: [ version, openwrt ]
+    steps:
+      - name: 安装工具
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl dpkg-dev
+
+      - uses: actions/checkout@v4
+
+      - name: 构建 LuCI 包与 .deb
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          ./packaging/openwrt/scripts/build-luci.sh "$VERSION" 1
+          VERSION="$VERSION" ./packaging/desktop/build-deb.sh
+
+      - name: 发布到 Release
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          ./scripts/publish-release.sh "$VERSION" "$VERSION" \
+            packaging/openwrt/staging/*.ipk \
+            packaging/openwrt/staging/*.apk \
+            packaging/desktop/out/*.deb

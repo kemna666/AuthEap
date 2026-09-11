@@ -24,30 +24,41 @@
 - **插件接口**：`src/plugin.rs` 提供公开 `Plugin` trait 与 `PluginManager`；
   写一个插件只需实现 `prepare`/`on_received`（可选 `on_auth_event`+`SessionHost`
   协议级反驱），在 `src/plugins/mod.rs` 登记名字即可被 `--plugin <name>` 启用。
-  内置 `printer`（打印）、`stats`（统计示例）、`report`（如实上报本机真实信息）。
+  内置 `printer`（打印）、`stats`（统计示例）、`report`（如实上报本机真实信息）、
+  `beacon`（**周期向指定 IP:端口 发送自定义 TCP 数据包**，目标/间隔/载荷可在 LuCI 调整，
+  **载荷默认内置**，需要时用 `--beacon-payload` 或 LuCI 覆盖）。
   教程见 `docs/plugin-development.md`。
-- **OpenWrt 打包（24.10+）与 LuCI**：见 `packaging/openwrt/`——同时产出
-  `.ipk`（opkg）与 `.apk`（24.10 apk）两种格式，并附新版 LuCI 界面
-  （JS + ucode/rpcd + UCI），支持：**开机自启**开关（enable/disable 软链）、
-  **认证网卡下拉选择**、以及**追加其他插件**（`extra_plugins`，空格/逗号分隔）。
-- **模块化收发包后端**：
-  - `raw`：Linux 原生 AF_PACKET（默认，无需外部库，需要 root）。
-  - `pcap`：libpcap（跨平台，需编译时启用 `backend-pcap` feature）。
-- **Rust 风格 CLI**（clap）：多参数、插件可重复指定、密码可走环境变量 `AUTHEAP_PASSWORD`。
-- 全面单元测试：所有专有哈希与 `computeV4/computePwd` 均有由**原版 C 编译生成的黄金
-  参考向量**逐字节校验。
+- **LuCI 界面（OpenWrt 24.10+）**：配置页按**每个插件/功能各自一个 Tab** 组织
+  —— 基本设置 / 插件 / rjv3 锐捷 / beacon 保活 / 日志（下方固定显示后端配置文件）；
+  另有**实时日志页**（状态页已移除全部日志相关内容），可查看历史 `.1/.2…` 日志。
+  状态页自带**网络测试**：填目标 `IP / 主机[:端口]` 后一键检查本机接口/网关/DNS、
+  目标域名解析、TCP 连接与 ICMP 连通性（留空只测本机与网关）。详见
+  `packaging/openwrt/`。
+- **配置文件认证**：`autheap --config /etc/autheap-client.conf`——LuCI 保存配置时会把
+  UCI 渲染成该文件，服务启动时也自动刷新并用它认证（`key = value` 文本，命令行参数
+  优先）。单独跑官方命令也不再需要一长串参数。
+- **日志实时可读 + 自动清理**：`--log-file` 追加写入并逐行 flush（LuCI 增量读取、
+  `tail -f` 都是实时的，守护模式也不丢日志）；超过 `--log-max-kb` 自动轮转为
+  `xxx.log.1/.2/…`，只保留 `--log-keep` 份（`--log-rotate-secs` 控制检查间隔），
+  默认每 5 分钟检查一次、单文件上限 256KB、保留 3 份历史。
 
 ## 目录结构
 
 ```
+.github/workflows/        CI/CD（ci.yml：构建测试 + 打包）
+.forgejo/workflows/       CI/CD（自建 Forgejo runner：ci.yml + release.yml 发布）
+scripts/                  版本递增 / 静态检查 / 交叉编译打包 / 发布脚本
 src/
-├── main.rs              入口（信号、守护进程化）
+├── main.rs              入口（信号、守护进程化、日志文件）
 ├── cli.rs               clap 命令行定义
-├── config.rs            运行配置与默认值
+├── config.rs            运行配置、默认值与配置文件解析（--config）
+├── logging.rs           日志（文件追加/flush/自动轮转清理）
 ├── runtime.rs           认证状态机 + 事件循环 + 定时器 + 二次认证/心跳
 ├── packet_builder.rs    标准 EAP/EAPOL 帧构建
 ├── eth_frame.rs         协议常量与帧表示
 ├── net/                 Io 抽象、AF_PACKET raw、pcap（feature）、接口信息
+├── nettest.rs           网络测试（本机/网关/DNS/目标连通性诊断，--nettest）
+├── plugins/             普通插件注册表（printer/stats/report/beacon…）
 └── packet_plugin/
     ├── rjv3/
     │   ├── hash/        锐捷专有哈希移植（含 S-box 与常量表）
@@ -98,12 +109,32 @@ sudo systemctl enable --now autheap
 
 详见 `packaging/desktop/README.md`。
 
+### 版本号与发布
+
+- **版本号规则：`0.1.x`**，**每发布一次 release 就把 `x` 加一**：
+  `0.1.1` → `0.1.2` → `0.1.3` …（不换主/次版本号，也不用 `-2`、`-r2` 这类发布号来区分）。
+- 包文件名里的 `-1`（apk 为 `-r1`）是包管理器自己的 revision，**发新版本时保持 `1`**。
+- 递增版本号（同时改 `Cargo.toml` 与 `Cargo.lock`）：
+
+```bash
+./scripts/bump-version.sh -n          # 只看下一个版本号
+./scripts/bump-version.sh             # 0.1.2 → 0.1.3
+./scripts/bump-version.sh --set 0.1.5 # 指定版本
+```
+
+- **CI 自动处理**：推送 tag（如 `0.1.3`）或手动触发 release 流程时，流水线会取远端
+  同主版本号的最大版本 +1（未发布过的 `Cargo.toml` 版本则原样发布），交叉编译并
+  上传 `.ipk` / `.apk` / `.deb`，然后在 Codeberg/Forgejo 创建 Release。
+- 打包脚本的默认版本号在 `packaging/openwrt/scripts/common.sh`、`build-luci.sh`、
+  `packaging/desktop/build-deb.sh`、`packaging/openwrt/autheap-client/Makefile`，
+  发版时用 `bump-version.sh` 后同步这几处默认值即可（CI 里由 `ci-version.sh` 注入）。
+
 ## 运行
 
 需要 root（raw 后端 / 打开网络接口）。
 
 ```bash
-sudo autheap -i eth0 -u 201000000 -p 密码 --plugin rjv3
+sudo autheap -i eth0 -u 你的账号 -p 密码 --plugin rjv3
 
 # 二次认证（先跑 dhcp 脚本拿地址，再进行第二轮认证）
 sudo autheap -i enp5s0 -u 学号 -p 密码 \
@@ -114,6 +145,78 @@ sudo autheap -i eth0 -u u -p p --plugin printer --plugin rjv3
 ```
 
 常用参数摘要见 `autheap --help`。
+
+### 网络测试（诊断，不需要账号）
+
+认证不上时先分清“网络本身不通”还是“账号/协议问题”：
+
+```bash
+sudo autheap --nettest                    # 只测本机接口/网关/DNS
+sudo autheap --nettest 203.0.113.10       # 目标：IP / 主机名（默认 TCP 80）
+sudo autheap --nettest 203.0.113.10:8083 -i eth0   # 指定端口与接口
+```
+
+输出分【本机】【目标】【ICMP ping】【结论】四段：接口地址/掩码/默认网关/DNS、
+目标域名解析、TCP 连接（默认 80，可用 `主机:端口` 指定）、ICMP 往返时延；
+有问题的那一行标 ✘，**退出码 0 = 未发现问题，1 = 有异常**（便于脚本判断）。
+ICMP 需要 root / `CAP_NET_RAW`，权限不足时会写“跳过”而不是报错。
+OpenWrt 的 LuCI 状态页也内置了同样的测试入口。
+
+### 单实例守护进程
+
+- **跑认证的进程会先抢一把单实例锁**（默认 `/var/run/autheap.pid`，可用 `--pid-file <PATH>`
+  指定、传空字符串关闭）：已经有实例在跑时，再启动会**直接拒绝**并写明原因，例如
+  `已有认证进程在运行（pid 1234）`，**退出码 3**（便于脚本判断）；锁由内核在进程退出时
+  自动释放，`kill -9` 也不会留下死锁。
+- **诊断 / 查询类命令不加锁**，守护进程在跑的时候随时可用：
+
+```bash
+autheap --nettest 203.0.113.10   # 网络测试（不占网卡、不需账号）
+autheap --list-plugins           # 列出已编译插件
+autheap --help                   # 帮助与全部参数
+```
+
+- OpenWrt 上由 `/etc/init.d/autheap-client restart|stop|start` 管理；procd 自己用的
+  pidfile 是 `/var/run/autheap-client.pid`，与上面这把锁互不影响。
+
+### 配置文件方式（推荐用于服务/OpenWrt）
+
+```bash
+# 例：/etc/autheap-client.conf 内容形如
+#   interface = eth0
+#   username = 你的账号
+#   password = 你的密码
+#   plugins = rjv3 beacon
+#   log_file = /var/log/autheap-client.log
+#   log_max_kb = 256
+#   log_keep = 3
+#   log_rotate_secs = 300
+#   beacon_dst = 203.0.113.10      # 换成你自己的目标地址
+#   beacon_port = 8083
+#   beacon_interval = 60
+#   beacon_payload =              # 可留空（用内置默认载荷），或填自己的抓包 Data 十六进制
+sudo autheap --config /etc/autheap-client.conf
+```
+
+命令行上显式给出的参数会覆盖配置文件里的同名项。
+
+### beacon 插件：周期向指定 IP 发送数据包
+
+```bash
+# 每 60 秒向指定 IP:端口 发送一段 TCP 载荷
+# （目标地址由你指定；载荷默认用内置的，可用 --beacon-payload 覆盖）
+sudo autheap -i eth0 -u 学号 -p 密码 --plugin rjv3 --plugin beacon \
+     --beacon-dst 203.0.113.10 --beacon-port 8083 --beacon-interval 60
+```
+
+要点：
+
+- **不写死任何 IP**：**源地址是运行本机的真实地址**（内核按路由填写），
+  **目的地址由你指定**；数据包的“时间”就是每次构造/发送的时刻；
+- **载荷默认内置**：不传 `--beacon-payload`（或 LuCI 里留空）即使用内置默认载荷；
+  需要更换时，填自己抓包 `Data` 的十六进制即可（长度需为偶数）。
+
+请仅在你拥有使用授权的网络上使用。
 
 ### 二次认证 / 字段覆盖示例
 
@@ -133,6 +236,7 @@ cargo test
 哈希移植的参考向量由原版 C 代码（`rjmd5.c`/`rjsha1.c`/`rjripemd128.c`/
 `rjtiger.c`/`rjwhirlpool.c`/`checkV4.c`）编译生成后内嵌到各单元测试中，
 因此可以脱离校园网在任意机器上验证算法保真度。
+
 
 ## 与上游的差异（重构说明）
 

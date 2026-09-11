@@ -1,0 +1,123 @@
+#!/bin/sh
+# 把 UCI 配置(/etc/config/autheap-client) 生成为后端可直接读取的配置文件。
+#
+# 生成结果默认写到 /etc/autheap-client.conf，格式为 `键 = 值` 文本，供
+#   autheap --config /etc/autheap-client.conf
+# 直接使用（后端不再依赖一堆命令行参数，见 src/config.rs::load_file）。
+#
+# 触发时机：
+#   - /etc/init.d/autheap-client start 时（每次启动前刷新）；
+#   - LuCI 保存配置时（rpcd do_set 里调用）。
+#
+# 用法: gen-config [输出文件]
+set -u
+
+CONF='autheap-client'
+OUT="${1:-/etc/autheap-client.conf}"
+
+# ---------- 读 UCI ----------
+getv() { uci -q get "$CONF.main.$1" 2>/dev/null || true; }
+getd() { # getd <option> <default>
+	local v
+	v="$(getv "$1")"
+	[ -n "$v" ] || v="$2"
+	printf '%s' "$v"
+}
+is_on() { # is_on <option> <default>
+	case "$(getd "$1" "$2")" in
+		1|true|on|yes|enable|enabled) printf '1' ;;
+		*) printf '0' ;;
+	esac
+}
+
+# ---------- 组装插件列表 ----------
+plugins=''
+add_plugin() {
+	case " $plugins " in
+		*" $1 "*) ;;
+		*) plugins="$plugins $1" ;;
+	esac
+}
+
+# 插件列表：
+#  - UCI 里存在 `plugins` 选项（新版 LuCI）→ 完全以它为准，**空列表 = 不启用任何插件**；
+#    （以前用 `-n "$uci_plugins"` 判断，用户清空列表后会回退到旧布尔开关，
+#     而 plugin_rjv3 默认是 1 → 表现为“插件去不掉”。）
+#  - 没有 `plugins` 选项（旧配置）→ 才回退到布尔开关 + extra_plugins。
+if uci -q get "$CONF.main.plugins" >/dev/null 2>&1; then
+	# 新版：UCI list plugins（可以为空）
+	for p in $(uci -q get "$CONF.main.plugins" 2>/dev/null | tr '\n' ' '); do
+		add_plugin "$p"
+	done
+else
+	# 旧配置：布尔开关 + extra_plugins
+	[ "$(is_on plugin_rjv3 1)" = 1 ] && add_plugin rjv3
+	[ "$(is_on plugin_printer 0)" = 1 ] && add_plugin printer
+	[ "$(is_on plugin_stats 0)" = 1 ] && add_plugin stats
+	for p in $(printf '%s' "$(getd extra_plugins '')" | tr ',' ' '); do
+		[ -n "$p" ] && add_plugin "$p"
+	done
+fi
+
+# beacon：只要配置了目标 IP 且间隔不为 0，就自动加入插件列表
+beacon_dst="$(getd beacon_dst '')"
+beacon_port="$(getd beacon_port 8083)"
+beacon_interval="$(getd beacon_interval 60)"
+if [ -n "$beacon_dst" ] && [ "$beacon_interval" != "0" ]; then
+	add_plugin beacon
+fi
+
+# ---------- 写配置文件 ----------
+tmp="$OUT.tmp.$$"
+{
+	echo "# AuthEAP-Client 配置文件 —— 由 LuCI/UCI 自动生成，请勿手工编辑"
+	echo "# 生成时间: $(date '+%Y-%m-%d %H:%M:%S')"
+	echo "# 来源: /etc/config/$CONF"
+	echo "# 后端用法: autheap --config $OUT"
+	echo
+	echo "# ---- 凭据与网卡 ----"
+	echo "interface = $(getd ifname eth0)"
+	echo "username = $(getd username '')"
+	echo "password = $(getd password '')"
+	echo "backend = $(getd backend raw)"
+	echo
+	echo "# ---- 插件 ----"
+	printf 'plugins =%s\n' "$plugins"
+	echo "printer_log_recv = $(is_on printer_log_recv 0)"
+	echo
+	echo "# ---- 流程 ----"
+	echo "heartbeat = $(getd heartbeat 20)"
+	echo "eap_bcast_addr = $(getd eap_bcast_addr 0)"
+	echo "dhcp_type = $(getd dhcp_type 2)"
+	echo "dhcp_script = $(getd dhcp_script '')"
+	echo "service = $(getd service internet)"
+	echo "version_str = $(getd version_str 'RG-SU For Linux V1.0')"
+	echo "fake_dns1 = $(getd fake_dns1 '')"
+	echo "fake_dns2 = $(getd fake_dns2 '')"
+	echo "fake_serial = $(getd fake_serial '')"
+	echo "max_dhcp_count = $(getd max_dhcp_count 3)"
+	echo "max_retries = $(getd max_retries 3)"
+	echo "max_failures = $(getd max_failures 3)"
+	echo "stage_timeout = $(getd stage_timeout 5)"
+	echo "restart_on_logoff = $(is_on restart_on_logoff 1)"
+	echo "wait_after_fail = $(getd wait_after_fail 30)"
+	echo
+	echo "# ---- 日志（自动轮转清理，见 log_* 三项）----"
+	echo "log_file = $(getd log_file /var/log/autheap-client.log)"
+	echo "log_max_kb = $(getd log_max_kb 256)"
+	echo "log_keep = $(getd log_keep 3)"
+	echo "log_rotate_secs = $(getd log_rotate_secs 300)"
+	echo
+	echo "# ---- beacon 保活插件（填了 beacon_dst 即启用）----"
+	echo "beacon_dst = $beacon_dst"
+	echo "beacon_port = $beacon_port"
+	echo "beacon_interval = $beacon_interval"
+	echo "beacon_payload = $(getd beacon_payload '')"
+	echo
+	echo "# ---- 单实例锁（认证进程只允许一个；留空 = 不限制）----"
+	echo "pid_file = $(getd pid_file /var/run/autheap.pid)"
+} > "$tmp" || { rm -f "$tmp"; exit 1; }
+
+chmod 0600 "$tmp" 2>/dev/null || true
+mv "$tmp" "$OUT" || { rm -f "$tmp"; exit 1; }
+echo "$OUT"

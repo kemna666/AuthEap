@@ -8,6 +8,12 @@ config autheap-client 'main'
 	option plugin_printer '0'
 	option plugin_stats '0'
 	option extra_plugins ''          # 额外插件名（空格/逗号分隔，需已编译进客户端）
+	# ---- beacon 插件：周期性向指定 IP:端口 发送自定义 TCP 数据包 ----
+	# 只要 beacon_dst 非空且 beacon_interval != 0，启动时就会自动启用 beacon 插件
+	option beacon_dst ''
+	option beacon_port '8083'
+	option beacon_interval '60'
+	option beacon_payload ''
 	option heartbeat '20'
 	option eap_bcast_addr '0'
 	option dhcp_type '2'
@@ -21,3 +27,11 @@ config autheap-client 'main'
 	option max_retries '3'
 	option max_failures '3'
 	option stage_timeout '5'
+	# ---- 日志：后端写入该文件并按大小自动轮转清理（保留 log_keep 份历史）----
+	option log_file '/var/log/autheap-client.log'
+	option log_max_kb '256'
+	option log_keep '3'
+	option log_rotate_secs '300'
+
+	# ---- 单实例：认证进程只允许一个（与 procd 的 pidfile 无关）----
+	option pid_file '/var/run/autheap.pid'

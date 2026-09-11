@@ -7,37 +7,33 @@ var callStatus = rpc.declare({
 	expect: {}
 });
 
-// 增量读取日志：只取上次 offset 之后的新增字节
-var callLog = rpc.declare({
-	object: 'luci.autheap_client',
-	method: 'log',
-	params: [ 'offset' ],
-	expect: { offset: 0, size: 0, data: '' }
-});
-
+// 本页只有两块内容：认证状态/服务控制 + 网络测试
+// 注意：LuCI 的 `expect` 只取【第一个键】且类型不符就用默认值，
+// 想拿整个返回对象就不要写 expect（后端 res/ok 返回的是 1/0 数字）。
+// 同理，**声明了 params 才按位置映射参数**；不声明 params 时传入的参数会被全部丢弃
+// （曾经因此把“停止”发成了空参数 → 后端落到默认 restart）。
 var callControl = rpc.declare({
 	object: 'luci.autheap_client',
 	method: 'control',
-	expect: { res: true }
+	params: [ 'action' ]
 });
 
-var REFRESH_MS = 1500;   // 拉取间隔
-var LOG_KEEP   = 400;    // 内存中保留的最大行数
-var LOG_SHOW   = 80;     // 界面上显示的行数
+// 网络测试（后端执行 autheap --nettest，返回纯文本报告）
+var callNetTest = rpc.declare({
+	object: 'luci.autheap_client',
+	method: 'nettest',
+	params: [ 'host', 'ifname' ]
+});
+
+var ACL_HINT = '（若提示 Access denied：请在设备上执行 /etc/init.d/rpcd restart 并重新登录 LuCI，再 Ctrl+F5 强刷）';
+
+var REFRESH_MS = 1500;   // 状态拉取间隔
 
 function row(label, el) {
 	return E('div', { 'class': 'cbi-value' }, [
 		E('div', { 'class': 'cbi-value-title' }, label),
 		E('div', { 'class': 'cbi-value-field' }, [ el ])
 	]);
-}
-
-function esc(s) {
-	return String(s)
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;')
-		.replace(/"/g, '&quot;');
 }
 
 function hhmmss() {
@@ -52,6 +48,7 @@ function fmtPlugins(p) {
 	if (p.rjv3) parts.push('rjv3');
 	if (p.printer) parts.push('printer');
 	if (p.stats) parts.push('stats');
+	if (p.beacon) parts.push('beacon');
 	if (p.extra) {
 		String(p.extra).split(/[\s,]+/).forEach(function (n) { if (n) parts.push(n); });
 	}
@@ -78,37 +75,14 @@ return L.view.extend({
 		var elUser = E('strong', {});
 		var elPwd = E('strong', {});
 		var elPlug = E('strong', {});
+		var elBeacon = E('strong', {});
 		var elVer = E('strong', {});
 		var elCore = E('strong', {});
 		var elMeta = E('em', {}, '尚未刷新');
 		var elErr  = E('div', { 'style': 'color:#c62828;font-size:12px' });
-		var elLog = E('pre', {
-			'style': 'max-height:340px;overflow:auto;background:#222;color:#9f9;padding:8px;margin-top:4px'
-		}, '(暂无日志)');
 		var bootBtn = E('button', { 'class': 'cbi-button cbi-button-action' });
 		var autoChk = E('input', { 'type': 'checkbox', 'checked': true });
-		var autoLbl = E('label', {}, [ autoChk, ' 自动刷新（实时）' ]);
-
-		// ---- 日志缓冲（旧 → 新）----
-		var logLines = [];
-		var logTail  = '';     // 尚未收到换行的半行
-
-		function renderLog() {
-			var out = logLines.slice(-LOG_SHOW).reverse().join('\n');
-			elLog.textContent = out || '(暂无日志)';
-		}
-
-		function pushChunk(text) {
-			var parts = String(text || '').split('\n');
-			parts[0] = logTail + parts[0];
-			logTail = parts.pop();
-			if (parts.length) {
-				logLines = logLines.concat(parts);
-				if (logLines.length > LOG_KEEP)
-					logLines = logLines.slice(-LOG_KEEP);
-				renderLog();
-			}
-		}
+		var autoLbl = E('label', {}, [ autoChk, ' 自动刷新（状态，每 1.5 秒）' ]);
 
 		function applyStatus(s) {
 			var boot = (s.enabled === true || s.enabled === 1);
@@ -132,7 +106,11 @@ return L.view.extend({
 			elRun.textContent = running ? '是' : '否';
 			elIfname.textContent = s.ifname || '-';
 			elUser.textContent = s.username || '-';
-			elPwd.textContent = (typeof s.pwdlen === 'number' ? s.pwdlen : '-') + ' 位';			elPlug.textContent = fmtPlugins(s.plugins);
+			elPwd.textContent = (typeof s.pwdlen === 'number' ? s.pwdlen : '-') + ' 位';
+			elPlug.textContent = fmtPlugins(s.plugins);
+			elBeacon.textContent = (s.beacon && s.beacon.dst)
+				? (s.beacon.dst + ':' + (s.beacon.port || 8083) + '，每 ' + (s.beacon.interval || 0) + ' 秒')
+				: '未启用';
 			elVer.textContent = s.version || '-';
 			elCore.textContent = s.core || '-';
 
@@ -141,8 +119,21 @@ return L.view.extend({
 		}
 
 		function control(action) {
-			return callControl({ action: action })
-				.then(function () { return callStatus(); })
+					return callControl(action)
+				.then(function (r) {
+					r = r || {};
+					if (!r.res) {
+						// 后端返回 res=0（1/0），带上 init.d/syslog 的原因
+						elErr.style.color = '#c62828';
+						elErr.textContent = '操作未成功：' + (r.output || '（后端无输出）') +
+							'；常见原因：未填账号或密码（服务会拒绝启动）、二进制缺失。' + ACL_HINT;
+					} else {
+						elErr.style.color = '#2e7d32';
+						elErr.textContent = r.output ? ('操作成功（' + action + '）：' + r.output)
+							: ('操作成功（' + action + '）');
+					}
+					return callStatus();
+				})
 				.then(function (s) { applyStatus(s); })
 				.catch(function (e) { elErr.textContent = '操作失败: ' + (e.message || e); });
 		}
@@ -156,8 +147,6 @@ return L.view.extend({
 
 		// ---- 刷新循环：自排队 setTimeout，绝不并发堆积 ----
 		var timer = null;
-		var logOffset = 0;
-		var lastStatus = {};
 		var gen = 0;             // 页码（视图重建后旧循环自动失效）
 
 		function err(e) { return (e && (e.message || e.toString())) || '未知错误'; }
@@ -171,40 +160,18 @@ return L.view.extend({
 		function tick() {
 			var my = gen;
 			var errs = [];
-			var pend = 2;
 
-			function done() {
-				if (--pend > 0) return;
+			callStatus().then(function (s) {
+				if (my !== gen) return;
+				applyStatus(s || {});
+			}, function (e) {
+				if (my === gen) errs.push('状态刷新失败: ' + err(e));
+			}).then(function () {
 				if (my !== gen) return;
 				elMeta.textContent = '最后更新 ' + hhmmss();
 				elErr.textContent = errs.join(' | ');
 				schedule();
-			}
-
-			callStatus().then(function (s) {
-				if (my !== gen) return;
-				lastStatus = s || {};
-				applyStatus(lastStatus);
-			}, function (e) {
-				if (my === gen) errs.push('状态刷新失败: ' + err(e));
-			}).then(done);
-
-			callLog({ offset: logOffset }).then(function (r) {
-				if (my !== gen) return;
-				r = r || {};
-				if (typeof r.offset === 'number') logOffset = r.offset;
-				if (r.data) pushChunk(r.data);
-			}, function (e) {
-				if (my !== gen) return;
-				errs.push('日志刷新失败: ' + err(e) +
-					'（若刚装完插件，请重新登录 LuCI 并 Ctrl+F5 强制刷新）');
-				// 回退：后端仍是旧版时，用 status 里的兼容字段
-				if (!logLines.length && typeof lastStatus.log === 'string' && lastStatus.log) {
-					logLines = lastStatus.log.split('\n');
-					logTail = '';
-					renderLog();
-				}
-			}).then(done);
+			});
 		}
 
 		autoChk.addEventListener('change', function () {
@@ -217,7 +184,6 @@ return L.view.extend({
 		});
 
 		applyStatus(st || {});
-		// 首次进入：offset=0 → 后端只回最近一段日志
 		gen++;
 		tick();
 
@@ -231,7 +197,9 @@ return L.view.extend({
 			row('运行中', elRun),
 			row('接口', elIfname),
 			row('用户名', elUser),
-			row('密码长度', elPwd),			row('插件', elPlug),
+			row('密码长度', elPwd),
+			row('插件', elPlug),
+			row('beacon 目标', elBeacon),
 			row('版本', elVer),
 			row('核心', elCore),
 			E('div', { 'class': 'cbi-page-actions' }, [
@@ -240,23 +208,86 @@ return L.view.extend({
 				ctrlButton('重启', 'restart'),
 				bootBtn
 			]),
-			E('h3', {}, '最近日志（流式，最新在上）'),
-			E('div', { 'style': 'display:flex;align-items:center;gap:12px;font-size:12px' }, [
+			E('div', { 'style': 'display:flex;align-items:center;gap:12px;font-size:12px;margin-top:10px' }, [
 				autoLbl,
 				E('button', {
 					'class': 'cbi-button cbi-button-neutral',
-					click: function () { gen++; logOffset = 0; logLines = []; logTail = ''; tick(); }
+					click: function () { gen++; tick(); }
 				}, '立即刷新'),
 				elMeta
 			]),
-			elErr,
-			elLog
+			elErr
+		]);
+
+		// ---- 网络测试 ----
+		var elNetHost = E('input', {
+			'type': 'text',
+			'class': 'cbi-input-text',
+			'placeholder': '目标 IP / 主机[:端口]，可留空（只测本机与网关）',
+			'style': 'min-width:280px'
+		});
+		var elNetMsg = E('em', { 'style': 'font-size:12px' });
+		var elNetOut = E('pre', {
+			'style': 'margin:8px 0 0;padding:8px 10px;max-height:340px;overflow:auto;' +
+			         'font-size:12px;line-height:1.45;white-space:pre-wrap;' +
+			         'border:1px solid #888;border-radius:4px;background:rgba(127,127,127,.08)'
+		}, '（尚未测试）');
+
+		if (st && st.beacon && st.beacon.dst)
+			elNetHost.value = st.beacon.dst;
+
+		function runNetTest() {
+			elNetMsg.style.color = '';
+			elNetMsg.textContent = '测试中…';
+			elNetOut.textContent = '测试中…';
+			// 注意：callNetTest 声明了 params，必须按位置传参
+			callNetTest(String(elNetHost.value || '').trim(), '')
+				.then(function (r) {
+					r = r || {};
+					if (r.output) {
+						elNetOut.textContent = r.output;
+						elNetMsg.textContent = r.ok ? '完成：未发现明显问题'
+							: '完成：发现异常（见结果中标 ✘ 的行）';
+						elNetMsg.style.color = r.ok ? '#2e7d32' : '#c62828';
+					} else {
+						elNetMsg.textContent = '完成：后端没有返回内容';
+						elNetMsg.style.color = '#c62828';
+						elNetOut.textContent =
+							'后端没有返回 output 字段。原始返回：\n' +
+							JSON.stringify(r) + '\n\n' +
+							'可在设备上执行下面命令定位：\n' +
+							'  /usr/bin/autheap --nettest\n' +
+							'  echo \'{"host":""}\' | /usr/libexec/rpcd/luci.autheap_client call nettest\n\n' +
+							ACL_HINT;
+					}
+				}, function (e) {
+					elNetMsg.textContent = '';
+					elNetOut.textContent = '测试失败: ' + (e && (e.message || e)) + '\n' + ACL_HINT;
+				});
+		}
+
+		var netSection = E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, '网络测试'),
+			E('div', { 'class': 'cbi-map-descr' },
+				'检查本机接口地址 / 默认网关 / DNS，以及对目标的域名解析、TCP 连接（默认端口 80，' +
+				'也可写成 目标:端口）与 ICMP 连通性。ICMP 需要 root 权限（服务本身以 root 运行）；' +
+				'目标留空则只检查本机与默认网关。'),
+			E('div', { 'style': 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0' }, [
+				elNetHost,
+				E('button', {
+					'class': 'cbi-button cbi-button-action',
+					click: function () { runNetTest(); }
+				}, '开始测试'),
+				elNetMsg
+			]),
+			elNetOut
 		]);
 
 		return E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, 'AuthEAP-Client'),
-			E('div', { 'class': 'cbi-map-descr' }, '认证状态、服务控制与实时日志（增量流式拉取，每 1.5 秒）。'),
-			section
+			E('div', { 'class': 'cbi-map-descr' }, '认证状态与服务控制（每 1.5 秒自动刷新）。'),
+			section,
+			netSection
 		]);
 	}
 });

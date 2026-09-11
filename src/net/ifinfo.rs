@@ -133,6 +133,25 @@ pub fn default_gateway_v4(ifname: &str) -> Option<std::net::Ipv4Addr> {
     }
 }
 
+/// 默认路由所在的接口名（Linux: /proc/net/route，dest 为 0 的那行）
+pub fn default_route_iface() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let content = std::fs::read_to_string("/proc/net/route").ok()?;
+        for line in content.lines().skip(1) {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() >= 2 && f[1] == "00000000" {
+                return Some(f[0].to_string());
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// 读取 DNS 服务器列表（/etc/resolv.conf）
 pub fn dns_list() -> Result<Vec<String>> {
     let content = std::fs::read_to_string("/etc/resolv.conf")

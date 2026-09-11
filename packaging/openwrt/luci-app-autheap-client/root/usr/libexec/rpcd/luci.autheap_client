@@ -3,14 +3,20 @@
 #
 # 协议（与 /usr/libexec/rpcd/luci.argon_wallpaper 一致）：
 #   $1 = list|call ; $2 = 方法名 ; 请求参数(JSON)从 stdin 读取；结果(jshn JSON)输出到 stdout
-# 提供方法: get_config / set_config / list_interfaces / status / control
+# 提供方法: get_config / set_config / list_interfaces / list_plugins / status /
+#           log / log_files / log_clear / config_file / gen_config / nettest / control
 
 . /usr/share/libubox/jshn.sh
 
 CONF='autheap-client'
-LOG_FILE='/var/log/autheap-client.log'
-LOG_MAX_CHUNK=16384        # 单次最多返回 16KB
-LOG_SKIP_CHUNK=32768       # 落后超过 32KB 则跳到尾部（防止网页卡顿）
+PROG='/usr/bin/autheap'
+LOG_FILE_DEFAULT='/var/log/autheap-client.log'
+LOG_FILE="$LOG_FILE_DEFAULT"
+CONF_FILE='/etc/autheap-client.conf'
+GENCONF='/usr/libexec/autheap-client/gen-config'
+LOG_MAX_CHUNK=16384        # 单次默认最多返回 16KB
+LOG_HARD_MAX=262144        # 单次硬上限 256KB（历史视图用）
+LOG_BACKUPS=9              # 最多枚举 .1 ... .9 份历史
 
 # ---------- 读取辅助 ----------
 getval() { # getval <option> <default>
@@ -26,6 +32,66 @@ bval() { # bval <option> <default(0/1)>  -> 1/0（jshn 布尔只认数值 0/1）
 	esac
 }
 ival() { getval "$1" "$2"; }
+
+# 后端**实际写入**的日志路径：后端读的是 $CONF_FILE（LuCI 可能改过 log_file），
+# 所以先取生成的配置文件里的 log_file，其次 UCI，最后默认值。
+# 不再直接用硬编码路径，避免“LuCI 里改了日志路径 → 日志页一直空”。
+log_file_effective() {
+	local f=''
+	if [ -r "$CONF_FILE" ]; then
+		f="$(sed -n 's/^[[:space:]]*log_file[[:space:]]*=[[:space:]]*//p' "$CONF_FILE" 2>/dev/null | head -n1)"
+	fi
+	[ -n "$f" ] || f="$(uci -q get "$CONF.main.log_file" 2>/dev/null)"
+	[ -n "$f" ] || f="$LOG_FILE_DEFAULT"
+	printf '%s' "$f"
+}
+
+# 日志文件/历史文件路径（id: '' 或 0 = 当前；1..9 = .1/.2…）
+log_path_of() {
+	local base="$(log_file_effective)"
+	case "$1" in
+		''|0) printf '%s' "$base" ;;
+		1|2|3|4|5|6|7|8|9) printf '%s.%s' "$base" "$1" ;;
+		*) printf '%s' "$base" ;;
+	esac
+}
+
+# 从 <file> 的 <offset> 处读取最多 <count> 字节（<size> 为文件大小，用于兜底判断）。
+# 用哨兵字节保留行尾换行（$(...) 会剥掉尾部换行），并兼容不支持 `tail -c +N` 的
+# BusyBox 实现（退回 dd 精确读取）。
+read_bytes() {
+	local f="$1" off="$2" cnt="$3" size="$4" data=''
+	if [ "$off" -le 0 ]; then
+		data="$( { tail -c "$cnt" "$f" 2>/dev/null; printf '\001'; } )"
+	else
+		data="$( { tail -c "+$((off + 1))" "$f" 2>/dev/null | head -c "$cnt"; printf '\001'; } )"
+	fi
+	if [ -z "$data" ] && [ "$size" -gt "$off" ]; then
+		data="$( { dd if="$f" bs=1 skip="$off" count="$cnt" 2>/dev/null; printf '\001'; } )"
+	fi
+	data="${data%?}"
+	printf '%s' "$data"
+}
+
+# 追加日志文件列表（字段名 log_files）到当前 json 对象。
+# 同时给 status 与 log_files 两个方法复用：status 的 ACL 一直有授权，
+# 因此即使新版 ACL 尚未生效（未重启 rpcd / 未重新登录），「日志」页也能列出文件。
+emit_log_files() {
+	local i f sz
+	json_add_array log_files
+	for i in '' 1 2 3 4 5 6 7 8 9; do
+		f="$(log_path_of "$i")"
+		[ -f "$f" ] || continue
+		sz="$(wc -c < "$f" 2>/dev/null | tr -dc '0-9')"
+		[ -n "$sz" ] || sz=0
+		json_add_object
+		json_add_string id "$i"
+		json_add_string name "${f##*/}"
+		json_add_int size "$sz"
+		json_close_object
+	done
+	json_close_array
+}
 
 # 追加整段配置到当前 json 对象
 emit_config() {
@@ -50,6 +116,16 @@ emit_config() {
 	json_add_int     max_retries  "$(ival max_retries 3)"
 	json_add_int     max_failures "$(ival max_failures 3)"
 	json_add_int     stage_timeout "$(ival stage_timeout 5)"
+	# beacon 保活插件
+	json_add_string  beacon_dst      "$(getval beacon_dst '')"
+	json_add_int     beacon_port     "$(ival beacon_port 8083)"
+	json_add_int     beacon_interval "$(ival beacon_interval 60)"
+	json_add_string  beacon_payload  "$(getval beacon_payload '')"
+	# 日志与自动清理
+	json_add_string  log_file        "$(getval log_file "$LOG_FILE")"
+	json_add_int     log_max_kb      "$(ival log_max_kb 256)"
+	json_add_int     log_keep        "$(ival log_keep 3)"
+	json_add_int     log_rotate_secs "$(ival log_rotate_secs 300)"
 }
 
 # ---------- 方法: set_config ----------
@@ -62,20 +138,26 @@ do_set() {
 		case "$v" in true|1) nv=1;; *) nv=0;; esac
 		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$nv" ] || { uci set "$CONF.main.$k=$nv"; changed=1; }
 	done
-	for k in heartbeat eap_bcast_addr dhcp_type max_dhcp_count max_retries max_failures stage_timeout; do
+	for k in heartbeat eap_bcast_addr dhcp_type max_dhcp_count max_retries max_failures stage_timeout \
+	         beacon_port beacon_interval log_max_kb log_keep log_rotate_secs; do
 		json_get_var v "$k"
 		[ -n "$v" ] || continue
 		nv="$((v))"
 		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$nv" ] || { uci set "$CONF.main.$k=$nv"; changed=1; }
 	done
 	# 字符串字段：显式提交即写入（含清空为 "" 的情况，避免旧值残留）；缺失的键不动
-	for k in ifname username password backend extra_plugins dhcp_script service version_str fake_dns1 fake_dns2 fake_serial; do
+	for k in ifname username password backend extra_plugins dhcp_script service version_str \
+	         fake_dns1 fake_dns2 fake_serial beacon_dst beacon_payload log_file; do
 		json_get_type _t "$k"
 		[ "$_t" = "string" ] || continue
 		json_get_var v "$k"
 		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$v" ] || { uci set "$CONF.main.$k=$v"; changed=1; }
 	done
 	[ "$changed" = 1 ] && uci commit "$CONF"
+	# 把 UCI 渲染成后端配置文件（autheap --config 实际读取它）
+	if [ -x "$GENCONF" ]; then
+		"$GENCONF" "$CONF_FILE" >/dev/null 2>&1 || true
+	fi
 	echo '{"res":true}'
 }
 
@@ -108,17 +190,18 @@ do_status() {
 	json_add_int pwdlen "$(getval password '' | wc -c)"
 	json_add_string ifname   "$(getval ifname eth0)"
 	json_add_object plugins
-		local p rjv3 printer stats extra plugins
+		local p rjv3 printer stats beacon extra plugins
 		plugins="$(uci -q get "$CONF.main.plugins" 2>/dev/null)"
-		rjv3=0; printer=0; stats=0; extra=''
-		if [ -n "$plugins" ]; then
-			# 新：UCI list plugins（可能含换行分隔）
+		rjv3=0; printer=0; stats=0; beacon=0; extra=''
+		if uci -q get "$CONF.main.plugins" >/dev/null 2>&1; then
+			# 新：UCI list plugins（存在即以其为准，可以为空 = 不启用任何插件）
 			for p in $(printf '%s\n' "$plugins"); do
 				[ -n "$p" ] || continue
 				case "$p" in
 					rjv3) rjv3=1 ;;
 					printer) printer=1 ;;
 					stats) stats=1 ;;
+					beacon) beacon=1 ;;
 					*) [ -z "$extra" ] && extra="$p" || extra="$extra $p" ;;
 				esac
 			done
@@ -129,69 +212,276 @@ do_status() {
 			stats="$(bval plugin_stats 0)"
 			extra="$(getval extra_plugins '')"
 		fi
+		# beacon 由“目标 IP + 间隔”驱动：填了目标即自动启用
+		if [ -n "$(getval beacon_dst '')" ] && [ "$(ival beacon_interval 60)" != "0" ]; then
+			beacon=1
+		fi
 		json_add_boolean rjv3 "$rjv3"
 		json_add_boolean printer "$printer"
 		json_add_boolean stats "$stats"
+		json_add_boolean beacon "$beacon"
 		json_add_string  extra "$extra"
 	json_close_object
+	# beacon 参数（供 LuCI 显示/编辑）
+	json_add_object beacon
+		json_add_string dst "$(getval beacon_dst '')"
+		json_add_int port "$(ival beacon_port 8083)"
+		json_add_int interval "$(ival beacon_interval 60)"
+		json_add_int payload_len "$(printf '%s' "$(getval beacon_payload '')" | wc -c | tr -dc '0-9')"
+	json_close_object
+	# 日志与自动清理
+	json_add_string log_file "$(log_file_effective)"
+	json_add_int log_max_kb "$(ival log_max_kb 256)"
+	json_add_int log_keep "$(ival log_keep 3)"
+	json_add_int log_rotate_secs "$(ival log_rotate_secs 300)"
+	# 日志文件列表（当前 + 历史）；见 emit_log_files 注释
+	emit_log_files
+	# 后端实际读取的配置文件
+	json_add_string config_file "$CONF_FILE"
+	json_add_boolean config_file_exists "$([ -f "$CONF_FILE" ] && echo 1 || echo 0)"
 	# 兼容字段：旧版前端（浏览器可能仍缓存旧 JS）读的是这个字段，
 	# 新前端改用增量接口 log，不再使用它。保留可避免“升级后日志空白”。
-	local clog=''
-	[ -s "$LOG_FILE" ] && clog="$(tail -c 2048 "$LOG_FILE" 2>/dev/null)"
+	local clog='' curlog=''
+	curlog="$(log_file_effective)"
+	[ -s "$curlog" ] && clog="$(tail -c 2048 "$curlog" 2>/dev/null)"
 	json_add_string log "$clog"
 	json_dump
 	json_cleanup
 }
 
-# ---------- 方法: log（增量流式读日志）----------
-# 入参: {"offset": <已读字节数>}；出参: {offset, size, data}。
-# 只返回 offset 之后的新增内容，避免每次重复传输整段日志。
+# ---------- 方法: log（增量 / 历史读取）----------
+# 入参: {offset, file, mode, limit}
+#   file : ""=当前日志，1..9=历史 .1/.2…
+#   mode : "tail"（默认，增量）或 "history"（取文件末尾 limit 字节）
+# 出参: {offset, size, file, mode, data}
 do_log() {
-	local off='' size='' data='' f="$LOG_FILE"
+	local off='' size='' data='' mode='' limit='' file='' f=''
 	json_load "$1"
 	json_get_var off offset
+	json_get_var mode mode
+	json_get_var limit limit
+	json_get_var file file
 	case "$off" in ''|*[!0-9]*) off=0 ;; esac
+	case "$limit" in ''|*[!0-9]*) limit=$LOG_MAX_CHUNK ;; esac
+	[ "$limit" -le 0 ] && limit=$LOG_MAX_CHUNK
+	[ "$limit" -gt "$LOG_HARD_MAX" ] && limit=$LOG_HARD_MAX
+	f="$(log_path_of "$file")"
 	if [ ! -f "$f" ]; then
 		json_init
 		json_add_int offset 0
 		json_add_int size 0
+		json_add_string file "$f"
+		json_add_string mode "$mode"
 		json_add_string data ''
 		json_dump; json_cleanup
 		return
 	fi
 	size="$(wc -c < "$f" 2>/dev/null | tr -dc '0-9')"
 	[ -n "$size" ] || size=0
-	# 日志被截断/轮转（新启动会清空）或落后太多 → 重新定位
-	[ "$size" -lt "$off" ] && off=0
-	[ $((size - off)) -gt "$LOG_SKIP_CHUNK" ] && off=$((size - LOG_MAX_CHUNK))
-	[ $((size - off)) -gt "$LOG_MAX_CHUNK" ] && off=$((size - LOG_MAX_CHUNK))
-	if [ "$size" -gt "$off" ]; then
-		data="$(tail -c "+$((off + 1))" "$f" 2>/dev/null)"
+	if [ "$mode" = "history" ] || [ "$mode" = "all" ] || [ "$mode" = "full" ]; then
+		# 历史视图：取末尾 limit 字节（tail -c N 在 BusyBox/GNU 上都支持）
+		local from=0
+		[ "$size" -gt "$limit" ] && from=$((size - limit))
+		data="$(read_bytes "$f" "$from" "$limit" "$size")"
+		off="$size"
 	else
+		# 增量视图：文件被轮转/清空则从头；落后太多则跳到尾部附近
+		[ "$size" -lt "$off" ] && off=0
+		[ $((size - off)) -gt "$LOG_HARD_MAX" ] && off=$((size - limit))
+		data="$(read_bytes "$f" "$off" "$limit" "$size")"
 		off="$size"
 	fi
 	json_init
-	json_add_int offset "$size"
+	json_add_int offset "$off"
 	json_add_int size "$size"
+	json_add_string file "$f"
+	json_add_string mode "$mode"
 	json_add_string data "$data"
+	json_dump
+	json_cleanup
+}
+
+# ---------- 方法: log_files（列出当前 + 各历史日志）----------
+do_log_files() {
+	json_init
+	json_add_string current "$(log_file_effective)"
+	emit_log_files
+	json_dump
+	json_cleanup
+}
+
+# ---------- 方法: log_clear（清空当前与全部历史日志）----------
+do_log_clear() {
+	local i f
+	for i in '' 1 2 3 4 5 6 7 8 9; do
+		f="$(log_path_of "$i")"
+		[ -f "$f" ] && : > "$f" 2>/dev/null
+	done
+	rm -f "$(log_file_effective)".* 2>/dev/null
+	echo '{"res":true}'
+}
+
+# ---------- 方法: config_file（查看后端实际读取的配置文件）----------
+do_config_file() {
+	local content='' exists=0
+	if [ -f "$CONF_FILE" ]; then
+		exists=1
+		content="$(cat "$CONF_FILE" 2>/dev/null)"
+	fi
+	json_init
+	json_add_string path "$CONF_FILE"
+	json_add_boolean exists "$exists"
+	json_add_string content "$content"
+	json_dump
+	json_cleanup
+}
+
+# ---------- 方法: gen_config（按当前 UCI 重新生成配置文件）----------
+do_gen_config() {
+	if [ -x "$GENCONF" ]; then
+		"$GENCONF" "$CONF_FILE" >/dev/null 2>&1 || {
+			echo '{"res":false,"error":"gen-config 执行失败"}'
+			return
+		}
+		echo '{"res":true,"path":"'"$CONF_FILE"'"}'
+	else
+		echo '{"res":false,"error":"缺少 '"$GENCONF"'"}'
+	fi
+}
+
+# ---------- 方法: nettest（网络测试）----------
+# 入参: {host, ifname}；host 可为 `IP`、`主机名` 或 `主机:端口`（可留空）
+# 出参: {ok, host, ifname, output}
+do_nettest() {
+	local host='' ifname='' out='' rc=0 cmd=''
+	json_load "$1"
+	json_get_var host host
+	json_get_var ifname ifname
+	# 兜底：前端若把对象传成了参数，jshn 会把 host/ifname 弄成内部表名（J_xxx）
+	case "$host" in J_[A-Z0-9]*) host='' ;; esac
+	case "$ifname" in J_[A-Z0-9]*) ifname='' ;; esac
+	[ -n "$ifname" ] || ifname="$(getval ifname eth0)"
+
+	cmd="$PROG --nettest \"$host\" --interface \"$ifname\""
+
+	if [ ! -x "$PROG" ]; then
+		json_init
+		json_add_boolean ok 0
+		json_add_string host "$host"
+		json_add_string ifname "$ifname"
+		json_add_string output "✘ 找不到可执行文件 $PROG"
+		json_dump
+		json_cleanup
+		return
+	fi
+
+	# 给子进程加一层硬超时（rpcd/ubus 自己也有超时，超时会导致结果变空）
+	if command -v timeout >/dev/null 2>&1; then
+		out="$(timeout 20 "$PROG" --nettest "$host" --interface "$ifname" 2>&1)" || rc=$?
+	else
+		out="$("$PROG" --nettest "$host" --interface "$ifname" 2>&1)" || rc=$?
+	fi
+
+	# 自诊断：不要给前端一个“空结果”（空结果在 LuCI 里只能显示为“无输出”）
+	if [ "$rc" = 124 ] || [ "$rc" = 137 ] || [ "$rc" = 143 ]; then
+		out="✘ 测试超时（超过 20 秒被中止）：$cmd"
+		rc=1
+	fi
+	if [ -z "$out" ]; then
+		out="✘ 命令没有任何输出（exit=$rc）：$cmd
+（如果手动执行也没输出，说明当前安装的 /usr/bin/autheap 太旧、不支持 --nettest，请把主程序包 AuthEAP-Client 升级到 0.1.x）"
+		rc=1
+	fi
+
+	json_init
+	json_add_boolean ok "$([ "$rc" = 0 ] && echo 1 || echo 0)"
+	json_add_string host "$host"
+	json_add_string ifname "$ifname"
+	json_add_string output "$out"
 	json_dump
 	json_cleanup
 }
 
 # ---------- 方法: control ----------
 do_control() {
-	local action='restart'
-	json_load "$1"
+	local action='' raw='' out='' ok=0 lf='' action_note=''
+	raw="$1"
+	json_load "$raw"
 	json_get_var action action
-	[ -n "$action" ] || action='restart'
+	if [ -z "$action" ]; then
+		action='restart'
+		action_note='（未指定动作，已按 restart 处理）'
+	else
+		action_note='（显式）'
+	fi
+	case "$action" in
+		start|stop|restart|enable|disable) ;;
+		*) action='restart'; action_note="（未知动作，已按 restart 处理）" ;;
+	esac
+	# 审计：把 LuCI 传来的原始请求与动作记到 syslog 与服务日志,
+	# 便于在“日志”页/ logread 里看到“到底请求了什么动作”。
+	logger -t autheap-client "control: action=$action raw=$raw"
 	case "$action" in
 		enable|disable)
 			uci set "$CONF.main.enabled=$([ "$action" = enable ] && echo 1 || echo 0)"
 			uci commit "$CONF"
 			;;
 	esac
-	/etc/init.d/autheap-client "$action" >/dev/null 2>&1
-	echo "{\"res\":true,\"action\":\"$action\"}"
+	# 把 init.d 的真实结果拿出来：它拒绝启动（如未填账号/密码）时并不会输出到 stdout，
+	# 只往 syslog 写一行，以前这里永远返回成功，页面看不出失败。
+	if out="$(/etc/init.d/autheap-client "$action" 2>&1)"; then
+		ok=1
+	else
+		ok=0
+	fi
+	# init.d（尤其 USE_PROCD）未必靠返回码报错，而且 procd 派生进程有延迟，
+	# 所以这里轮询进程真实状态来判定成败（最多等 ~3 秒）。
+	case "$action" in
+		start|restart)
+			ok=0
+			local i=0
+			while [ "$i" -lt 15 ]; do
+				pidof autheap >/dev/null 2>&1 && { ok=1; break; }
+				sleep 0.2 2>/dev/null || sleep 1
+				i=$((i + 1))
+			done
+			;;
+		stop)
+			ok=1
+			local j=0
+			while [ "$j" -lt 15 ]; do
+				pidof autheap >/dev/null 2>&1 || break
+				sleep 0.2 2>/dev/null || sleep 1
+				j=$((j + 1))
+			done
+			pidof autheap >/dev/null 2>&1 && ok=0
+			;;
+	esac
+	if [ "$ok" = 0 ]; then
+		# init.d 拒绝启动时往往只往 syslog 记一行，捞最后一行为用户可见的原因
+		local tip
+		tip="$(logread -e autheap-client 2>/dev/null | tail -n 1)"
+		[ -n "$out" ] || out="$tip"
+		[ -n "$out" ] || out="（无输出）检查 logread -e autheap-client 与 uci show autheap-client"
+	fi
+
+	# 把这次操作写进服务日志文件：在“日志”页就能直接看到谁触发了什么动作
+	lf="$(log_file_effective)"
+	if [ -n "$lf" ]; then
+		if [ "$ok" = 1 ]; then
+			res_txt='成功'
+		else
+			res_txt='失败'
+		fi
+		echo "[ctl] $(date '+%Y-%m-%d %H:%M:%S') LuCI 请求动作=$action$action_note 结果=$res_txt${out:+ 输出=$out}" >> "$lf" 2>/dev/null
+	fi
+
+	json_init
+	json_add_boolean res "$ok"
+	json_add_string action "$action"
+	json_add_string output "$out"
+	json_dump
+	json_cleanup
 }
 
 # ---------- 方法: list_plugins ----------
@@ -224,7 +514,8 @@ EOF
 case "$1" in
 "list")
 	json_init
-	for m in get_config set_config list_interfaces list_plugins status log control; do
+	for m in get_config set_config list_interfaces list_plugins status \
+	         log log_files log_clear config_file gen_config nettest control; do
 		json_add_object "$m"
 		json_close_object
 	done
@@ -259,6 +550,26 @@ case "$1" in
 		log)
 			read -r input
 			do_log "$input"
+			;;
+		log_files)
+			read -r _input
+			do_log_files
+			;;
+		log_clear)
+			read -r _input
+			do_log_clear
+			;;
+		config_file)
+			read -r _input
+			do_config_file
+			;;
+		nettest)
+			read -r input
+			do_nettest "$input"
+			;;
+		gen_config)
+			read -r _input
+			do_gen_config
 			;;
 		control)
 			read -r input

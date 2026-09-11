@@ -9,8 +9,10 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod eth_frame;
+pub mod lockfile;
 pub mod logging;
 pub mod net;
+pub mod nettest;
 pub mod packet_builder;
 pub mod packet_plugin;
 pub mod plugin;
@@ -41,4 +43,12 @@ macro_rules! log_raw {
     ($($arg:tt)*) => { $crate::logging::log_raw(format_args!($($arg)*)) };
 }
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 版本号（可被 CI 覆盖）。
+///
+/// 默认取 `Cargo.toml` 的 `version`；若编译时设置了环境变量
+/// `AUTHEAP_BUILD_VERSION`（如 `scripts/ci-version.sh` 计算出的发布版本），
+/// 则优先使用它——这样 CI 无需修改源码就能给二进制打上正确的版本号。
+pub const VERSION: &str = match option_env!("AUTHEAP_BUILD_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};

@@ -115,6 +115,23 @@ sudo ./target/release/autheap -i eth0 -u <user> -p <pass> --plugin rjv3 --plugin
   DNS/主机名）与收发计数打到日志，方便入网前向使用者/网管如实核对环境；它不改帧、
   **不伪造任何“已安装软件/合规”类状态**（见 `src/plugins/report.rs` 头部注释）。
   可用 `--plugin report` 启用。
+- `beacon`（周期发包）：每隔一段时间向**用户指定**的 IP:端口发送一段 TCP 载荷
+  （默认用内置载荷，可用 `--beacon-payload` 覆盖）。它不改认证帧，只是独立的工作
+  线程按间隔发送。
+  配置项：`--beacon-dst`（目标）、`--beacon-port`（默认 8083）、
+  `--beacon-interval`（秒，默认 60）、`--beacon-payload`（载荷十六进制，可选）。
+  在 OpenWrt/LuCI 上这些项在“beacon 保活”Tab 里可视化调整（见
+  `packaging/openwrt/README.md`）。示例：
+
+  ```bash
+  sudo autheap -i eth0 -u 学号 -p 密码 --plugin rjv3 --plugin beacon \
+       --beacon-dst ip --beacon-port port --beacon-interval 60
+  ```
+
+  > 与抓包的区别：不硬编码任何 IP——源地址是本机真实地址（内核按路由填写），
+  > 目的地址由用户指定，载荷默认内置、可按需覆盖；数据包的“时间”就是每次构造/发送
+  > 的时刻。
+  > 仅在你拥有使用授权的网络上使用
 
 ## 5. 写一个“协议级”插件（进阶）
 

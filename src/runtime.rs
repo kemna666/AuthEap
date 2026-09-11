@@ -495,7 +495,7 @@ mod tests {
 
     fn base_cfg(plugin: bool) -> Config {
         let mut c = Config::default();
-        c.username = "201000000".into();
+        c.username = "testuser".into();
         c.password = "secret".into();
         c.ifname = "lo".into();
         c.plugins = if plugin { vec!["rjv3".into()] } else { vec![] };
@@ -569,7 +569,7 @@ mod tests {
         app.on_frame(&identity_req(1));
         assert_last_is(&io, 1, EapolType::EapPacket);
         let idout = io.outbound.lock().unwrap()[1].clone();
-        assert_eq!(&idout.buf[23..], b"201000000");
+        assert_eq!(&idout.buf[23..], b"testuser");
 
         let seed = [0x42u8; 16];
         app.on_frame(&challenge_req(2, &seed));
@@ -580,8 +580,11 @@ mod tests {
         expect.extend_from_slice(&seed);
         let digest = std_md5(&expect);
         assert_eq!(&chout.buf[24..40], &digest);
-        // 无插件：帧长应为精确标准长度 18+5+1+16+9 = 49
-        assert_eq!(chout.buf.len(), 18 + 5 + 1 + 16 + 9);
+        // 无插件：帧长 = 头 18 + EAP 头 5 + 1 + 16 + 用户名长度
+        assert_eq!(
+            chout.buf.len(),
+            18 + 5 + 1 + 16 + app.cfg.username.len()
+        );
 
         app.on_frame(&success_frame());
         assert!(app.authed);

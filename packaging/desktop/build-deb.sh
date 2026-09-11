@@ -6,7 +6,7 @@
 # 用法:
 #   ./build-deb.sh                         # 默认 raw 后端
 #   ./build-deb.sh --features backend-pcap
-#   VERSION=0.1.0 ./build-deb.sh
+#   VERSION=0.1.16 ./build-deb.sh
 #
 # 产物: packaging/desktop/out/autheap_<version>-<release>_<arch>.deb
 set -eu
@@ -15,7 +15,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 PKGDIR="$REPO/packaging/desktop"
 OUT="$PKGDIR/out"
 
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.1.16}"
 RELEASE="${RELEASE:-1}"
 NAME="autheap"
 ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"

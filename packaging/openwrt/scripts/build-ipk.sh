@@ -3,7 +3,7 @@
 #
 # 用法:
 #   build-ipk.sh --arch aarch64_cortex-a53 \
-#                [--version 0.1.0] [--release 1] \
+#                [--version 0.1.16] [--release 1] \
 #                [--binary staging/autheap]
 # 输出: staging/AuthEAP-Client_<version>-<release>_<arch>.ipk
 set -eu
@@ -37,14 +37,19 @@ trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/control" "$WORK/data"
 mkdir -p "$WORK/data/usr/bin" "$WORK/data/etc/init.d" "$WORK/data/etc/config"
+mkdir -p "$WORK/data/usr/libexec/autheap-client"
 
 cp "$BINARY" "$WORK/data/usr/bin/autheap"
 cp "$FILES_ROOT/etc/init.d/autheap-client" "$WORK/data/etc/init.d/autheap-client"
 cp "$FILES_ROOT/etc/config/autheap-client"  "$WORK/data/etc/config/autheap-client"
+# UCI → 后端配置文件 渲染脚本（init.d / LuCI 调用）
+cp "$FILES_ROOT/usr/libexec/autheap-client/gen-config" \
+   "$WORK/data/usr/libexec/autheap-client/gen-config"
 
 # 权限
 chmod 0755 "$WORK/data/usr/bin/autheap"
 chmod 0755 "$WORK/data/etc/init.d/autheap-client"
+chmod 0755 "$WORK/data/usr/libexec/autheap-client/gen-config"
 chmod 0600 "$WORK/data/etc/config/autheap-client"  # 含密码，收紧权限
 
 # control
