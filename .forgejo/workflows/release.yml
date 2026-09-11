@@ -1,13 +1,16 @@
-# Forgejo Actions —— 发布流水线（自托管 runner 时使用）
+# Forgejo Actions —— 发布流水线（**可直接在 Codeberg 的托管 runner 上运行**）
 #
-# Codeberg 请优先用仓库根目录的 `.woodpecker.yml`（Codeberg 不托管 Forgejo Actions）。
+# 启用前提（同 ci.yml）：仓库 Settings → Units → 勾选 “Enable Actions”；
+# 并添加仓库 Secret `RELEASE_TOKEN`（Codeberg 访问令牌，权限需含 write:repository）。
+#
+# runs-on 用 Codeberg 托管 runner 标签：codeberg-tiny(2min) / codeberg-small(5min) /
+# codeberg-medium(10min)，均可加 `-lazy` 后缀。托管 runner 不支持 Docker daemon，
+# 因此不写 `container:`，改用 rustup 装工具链（自建 runner 请把 runs-on 换成自己的 label）。
 #
 # 触发：
-#   - 推送 tag（如 0.1.2）：以 tag 作为版本号并发布；
+#   - 推送 tag（如 0.1.17）：以 tag 作为版本号并发布；
 #   - 手动触发（workflow_dispatch）：版本号对远端最大版本自动 +1 后发布
 #     —— 即“每发布一个版本依次递增”，无需手工改 Cargo.toml。
-#
-# 前置：仓库 Secret `RELEASE_TOKEN`（Forgejo 访问令牌，需 write:repository 权限）。
 name: Release
 
 on:
@@ -22,24 +25,17 @@ on:
 jobs:
   # ---------- 计算版本号（整条流水线共用）----------
   version:
-    runs-on: docker
-    container:
-      image: rust:1-bookworm
+    runs-on: codeberg-tiny
     outputs:
       version: ${{ steps.calc.outputs.version }}
     steps:
-      - name: 安装工具
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl
-
       - uses: actions/checkout@v4
 
       - name: 计算版本号
         id: calc
         env:
           BUMP_LEVEL: ${{ inputs.bump }}
-          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           V="$(./scripts/ci-version.sh)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
@@ -47,9 +43,7 @@ jobs:
 
   # ---------- 交叉编译 + 打包 + 上传 Release 附件 ----------
   openwrt:
-    runs-on: docker
-    container:
-      image: rust:1-bookworm
+    runs-on: codeberg-medium
     needs: [ version ]
     strategy:
       fail-fast: false
@@ -66,16 +60,21 @@ jobs:
             ipk_arch: mipsel_24kc
             apk_arch: mipsel_24kc
     steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust（含 rust-src）
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable --component rust-src
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: 安装交叉编译依赖
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl file
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends file curl
           if [ "${{ matrix.triple }}" = "aarch64-unknown-linux-musl" ]; then
-            apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
           fi
-          rustup component add rust-src
-
-      - uses: actions/checkout@v4
 
       - name: 交叉编译 + 打包 + 发布
         env:
@@ -87,17 +86,18 @@ jobs:
 
   # ---------- LuCI 界面包 + 桌面 deb ----------
   luci-desktop:
-    runs-on: docker
-    container:
-      image: rust:1-bookworm
+    runs-on: codeberg-small
     needs: [ version, openwrt ]
     steps:
-      - name: 安装工具
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl dpkg-dev
-
       - uses: actions/checkout@v4
+
+      - name: 安装 Rust 与打包工具
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev curl
 
       - name: 构建 LuCI 包与 .deb
         env:

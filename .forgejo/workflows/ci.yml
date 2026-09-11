@@ -1,8 +1,22 @@
-# Forgejo Actions（自托管 runner 时使用）
+# Forgejo Actions —— CI（**可直接在 Codeberg 的托管 runner 上运行**）
 #
-# 注意：Codeberg **不提供**托管的 Forgejo Actions（见 docs.codeberg.org/ci/actions），
-# 想在 Codeberg 上跑 CI/CD 请用仓库根目录的 `.woodpecker.yml`（Woodpecker CI）。
-# 本文件适用于自建 Forgejo 实例 / 自托管 runner。
+# ── 在 Codeberg 上启用（两步）────────────────────────────────────────────
+#   1. 仓库 Settings → Units → 勾选 “Enable Actions”（仓库页 “Enable more” 也能进）
+#   2. 下面的 `runs-on` 用 Codeberg 托管 runner 的标签（见下表）
+#
+#   标签             CPU  RAM  单 job 上限   说明
+#   codeberg-tiny    1    2G   2 分钟        轻量任务（lint、静态检查）
+#   codeberg-small   2    4G   5 分钟        一般构建/测试
+#   codeberg-medium  4    8G   10 分钟       交叉编译（本项目 mipsel / 打包用这个）
+#   每档都有 `-lazy` 变体（排队更久但更省能源，官方尽量 24h 内完成）。
+#
+# ── 两个官方限制（本文件已按此适配）────────────────────────────────────
+#   * 项目必须是公开仓库；
+#   * 托管 runner **不支持在 job 内跑 Docker daemon** → 所以这里不写 `container:`，
+#     而是在默认的 Ubuntu 环境里用 rustup 装工具链（把 ~/.cargo/bin 写进 $GITHUB_PATH，
+#     后续步骤即可直接用 cargo/rustup）。
+#
+# 自建 Forgejo runner：把 runs-on 改成你自己的 label（例如 docker）即可。
 name: CI
 
 on:
@@ -14,16 +28,20 @@ on:
 jobs:
   # ---------- 构建 + 单元测试 + 静态检查 ----------
   build-test:
-    runs-on: docker
-    container:
-      image: rust:1-bookworm
+    runs-on: codeberg-small
     steps:
-      - name: 安装基础工具
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates python3 curl
-
       - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: 环境信息
+        run: |
+          cargo -V
+          rustc -V
 
       - name: cargo build --release
         run: cargo build --release --locked
@@ -35,14 +53,12 @@ jobs:
         run: ./scripts/ci-checks.sh
 
   # ---------- 交叉编译 + 打包 .ipk / .apk ----------
+  # 每种目标单独一个 job（各自独立计时，避免超过单 job 时限）
   openwrt:
-    runs-on: docker
-    container:
-      image: rust:1-bookworm
+    runs-on: codeberg-medium
     needs: [ build-test ]
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - triple: x86_64-unknown-linux-musl
@@ -55,16 +71,21 @@ jobs:
             ipk_arch: mipsel_24kc
             apk_arch: mipsel_24kc
     steps:
-      - name: 安装交叉编译依赖
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl file
-          if [ "${{ matrix.triple }}" = "aarch64-unknown-linux-musl" ]; then
-            apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
-          fi
-          rustup component add rust-src
-
       - uses: actions/checkout@v4
+
+      - name: 安装 Rust（含 rust-src，用于 -Z build-std）
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable --component rust-src
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: 安装打包/交叉编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends file curl
+          if [ "${{ matrix.triple }}" = "aarch64-unknown-linux-musl" ]; then
+            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          fi
 
       - name: 交叉编译 + 打包
         env:
@@ -73,28 +94,31 @@ jobs:
           ./scripts/ci-build-package.sh \
             "${{ matrix.triple }}" "${{ matrix.ipk_arch }}" "${{ matrix.apk_arch }}"
           file packaging/openwrt/staging/autheap
+          ls -l packaging/openwrt/staging/
 
       - name: 上传产物
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: autheap-openwrt-${{ matrix.ipk_arch }}
+          if-no-files-found: error
           path: |
             packaging/openwrt/staging/*.ipk
             packaging/openwrt/staging/*.apk
 
   # ---------- LuCI 界面包 + 桌面 deb ----------
   luci-desktop:
-    runs-on: docker
-    container:
-      image: rust:1-bookworm
+    runs-on: codeberg-small
     needs: [ build-test ]
     steps:
-      - name: 安装工具
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates dpkg-dev
-
       - uses: actions/checkout@v4
+
+      - name: 安装 Rust 与打包工具
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev
 
       - name: 构建 LuCI 包与 .deb
         run: |
@@ -103,15 +127,17 @@ jobs:
           VERSION="$VERSION" ./packaging/desktop/build-deb.sh
 
       - name: 上传 LuCI 包
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: autheap-luci
+          if-no-files-found: error
           path: |
             packaging/openwrt/staging/luci-app-autheap-client_*.ipk
             packaging/openwrt/staging/luci-app-autheap-client-*.apk
 
       - name: 上传桌面 deb
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: autheap-desktop-deb
+          if-no-files-found: error
           path: packaging/desktop/out/*.deb
