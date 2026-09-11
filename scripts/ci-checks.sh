@@ -28,6 +28,29 @@ else
 	echo "[!] 未找到 python3，跳过 JSON 检查"
 fi
 
+# ---------- CI 流水线 YAML 合法性（有 pyyaml 才检查）----------
+YAML_FILES="$(ls .woodpecker.yml .github/workflows/*.yml .forgejo/workflows/*.yml 2>/dev/null || true)"
+if [ -n "$YAML_FILES" ]; then
+	echo "[*] YAML 检查"
+	python3 -c '
+import sys
+try:
+    import yaml
+except ImportError:
+    print("  [i] 没有 pyyaml，跳过 YAML 检查")
+    sys.exit(0)
+bad = 0
+for p in sys.argv[1:]:
+    try:
+        list(yaml.safe_load_all(open(p)))
+        print("  OK  " + p)
+    except Exception as e:
+        print("  ERR " + p + ": " + str(e))
+        bad = 1
+sys.exit(bad)
+' $YAML_FILES || fail=1
+fi
+
 # ---------- LuCI 视图 JS 语法 ----------
 # LuCI 视图是 CommonJS 风格（允许顶层 return），因此包一层函数再解析。
 JS_FILES="$(find packaging/openwrt/luci-app-autheap-client/root/www -name '*.js' 2>/dev/null | sort)"
