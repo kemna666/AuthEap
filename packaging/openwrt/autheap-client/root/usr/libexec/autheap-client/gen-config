@@ -9,11 +9,14 @@
 #   - /etc/init.d/autheap-client start 时（每次启动前刷新）；
 #   - LuCI 保存配置时（rpcd do_set 里调用）。
 #
-# 用法: gen-config [输出文件]
+# 用法: gen-config [输出文件] [line-section]
+#   不带 line-section：生成单线配置（原有行为）；
+#   带 line-section：生成该线路的独立配置（多线多拨），接口/账号/pid/state/log 可覆盖。
 set -u
 
 CONF='autheap-client'
 OUT="${1:-/etc/autheap-client.conf}"
+LINE="${2:-}"
 
 # ---------- 读 UCI ----------
 getv() { uci -q get "$CONF.main.$1" 2>/dev/null || true; }
@@ -29,6 +32,27 @@ is_on() { # is_on <option> <default>
 		*) printf '0' ;;
 	esac
 }
+
+# 线路 section 读取；空值回退 main（账号/密码等），但 ifname 必须由线路显式提供。
+lget() { # lget <option>  （line 有值则用 line，否则 main，不套默认）
+	local v=''
+	[ -n "$LINE" ] && v="$(uci -q get "$CONF.$LINE.$1" 2>/dev/null || true)"
+	[ -n "$v" ] || v="$(getv "$1")"
+	printf '%s' "$v"
+}
+lgetd() { # lgetd <option> <default>
+	local v
+	v="$(lget "$1")"
+	[ -n "$v" ] || v="$2"
+	printf '%s' "$v"
+}
+lis_on() { # lis_on <option> <default>
+	case "$(lgetd "$1" "$2")" in
+		1|true|on|yes|enable|enabled) printf '1' ;;
+		*) printf '0' ;;
+	esac
+}
+line_has() { [ -n "$LINE" ] && uci -q get "$CONF.$LINE.$1" >/dev/null 2>&1; }
 
 # ---------- 组装插件列表 ----------
 plugins=''
@@ -67,18 +91,71 @@ if [ -n "$beacon_dst" ] && [ "$beacon_interval" != "0" ]; then
 	add_plugin beacon
 fi
 
+# ---------- 线路覆盖值 ----------
+if [ -n "$LINE" ]; then
+	IFNAME="$(uci -q get "$CONF.$LINE.ifname" 2>/dev/null || true)"
+	if [ -z "$IFNAME" ]; then
+		echo "线路 $LINE 未设置 ifname" >&2
+		exit 1
+	fi
+	USERNAME="$(lget username)"
+	PASSWORD="$(lget password)"
+	if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+		echo "线路 $LINE 缺少用户名/密码（可继承 main）" >&2
+		exit 1
+	fi
+	if line_has dhcp_script; then
+		DHCP_SCRIPT="$(uci -q get "$CONF.$LINE.dhcp_script" 2>/dev/null || true)"
+	else
+		DHCP_SCRIPT="$(getd dhcp_script '')"
+	fi
+	BOOT_DELAY="$(lgetd boot_delay "$(getd boot_delay 600)")"
+	if line_has log_file; then
+		LOG_FILE="$(uci -q get "$CONF.$LINE.log_file" 2>/dev/null || true)"
+	else
+		base_log="$(getd log_file /var/log/autheap-client.log)"
+		case "$base_log" in
+			*.log) LOG_FILE="${base_log%.log}.$LINE.log" ;;
+			*)     LOG_FILE="$base_log.$LINE" ;;
+		esac
+	fi
+	if line_has pid_file; then
+		PID_FILE="$(uci -q get "$CONF.$LINE.pid_file" 2>/dev/null || true)"
+	else
+		PID_FILE="/var/run/autheap-client.$LINE.pid"
+	fi
+	if line_has state_file; then
+		STATE_FILE="$(uci -q get "$CONF.$LINE.state_file" 2>/dev/null || true)"
+	else
+		STATE_FILE="/var/run/autheap-client.$LINE.auth"
+	fi
+else
+	IFNAME="$(getd ifname eth0)"
+	USERNAME="$(getd username '')"
+	PASSWORD="$(getd password '')"
+	DHCP_SCRIPT="$(getd dhcp_script '')"
+	BOOT_DELAY="$(getd boot_delay 600)"
+	LOG_FILE="$(getd log_file /var/log/autheap-client.log)"
+	if uci -q get "$CONF.main.pid_file" >/dev/null 2>&1; then
+		PID_FILE="$(getv pid_file)"
+	else
+		PID_FILE="/var/run/autheap.pid"
+	fi
+	STATE_FILE="$(getd state_file /var/run/autheap-client.auth)"
+fi
+
 # ---------- 写配置文件 ----------
 tmp="$OUT.tmp.$$"
 {
 	echo "# AuthEAP-Client 配置文件 —— 由 LuCI/UCI 自动生成，请勿手工编辑"
 	echo "# 生成时间: $(date '+%Y-%m-%d %H:%M:%S')"
-	echo "# 来源: /etc/config/$CONF"
+	echo "# 来源: /etc/config/$CONF${LINE:+（线路 $LINE）}"
 	echo "# 后端用法: autheap --config $OUT"
 	echo
 	echo "# ---- 凭据与网卡 ----"
-	echo "interface = $(getd ifname eth0)"
-	echo "username = $(getd username '')"
-	echo "password = $(getd password '')"
+	echo "interface = $IFNAME"
+	echo "username = $USERNAME"
+	echo "password = $PASSWORD"
 	echo "backend = $(getd backend raw)"
 	echo
 	echo "# ---- 插件 ----"
@@ -87,11 +164,11 @@ tmp="$OUT.tmp.$$"
 	echo
 	echo "# ---- 流程 ----"
 	echo "daemon = $(is_on daemon 0)"
-	echo "boot_delay = $(getd boot_delay 600)"
+	echo "boot_delay = $BOOT_DELAY"
 	echo "heartbeat = $(getd heartbeat 20)"
 	echo "eap_bcast_addr = $(getd eap_bcast_addr 0)"
 	echo "dhcp_type = $(getd dhcp_type 2)"
-	echo "dhcp_script = $(getd dhcp_script '')"
+	echo "dhcp_script = $DHCP_SCRIPT"
 	echo "service = $(getd service internet)"
 	echo "version_str = $(getd version_str 'RG-SU For Linux V1.0')"
 	echo "fake_dns1 = $(getd fake_dns1 '')"
@@ -105,7 +182,7 @@ tmp="$OUT.tmp.$$"
 	echo "wait_after_fail = $(getd wait_after_fail 30)"
 	echo
 	echo "# ---- 日志（自动轮转清理，见 log_* 三项）----"
-	echo "log_file = $(getd log_file /var/log/autheap-client.log)"
+	echo "log_file = $LOG_FILE"
 	echo "log_max_kb = $(getd log_max_kb 256)"
 	echo "log_keep = $(getd log_keep 3)"
 	echo "log_rotate_secs = $(getd log_rotate_secs 300)"
@@ -116,14 +193,11 @@ tmp="$OUT.tmp.$$"
 	echo "beacon_interval = $beacon_interval"
 	echo "beacon_payload = $(getd beacon_payload '')"
 	echo
+	echo "# ---- 状态文件（LuCI 状态页读取；多线模式每线独立）----"
+	echo "state_file = $STATE_FILE"
+	echo
 	echo "# ---- 单实例锁（认证进程只允许一个；- 或留空 = 不限制）----"
-	# pid_file 需要区分“未设置”（用默认值）与“显式留空”（不限制单实例），
-	# 因此不能直接用 getd（它会把空值也替换成默认值）。
-	if uci -q get "$CONF.main.pid_file" >/dev/null 2>&1; then
-		echo "pid_file = $(getv pid_file)"
-	else
-		echo "pid_file = /var/run/autheap.pid"
-	fi
+	echo "pid_file = $PID_FILE"
 } > "$tmp" || { rm -f "$tmp"; exit 1; }
 
 chmod 0600 "$tmp" 2>/dev/null || true

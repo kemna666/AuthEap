@@ -84,6 +84,18 @@ case "$TRIPLE" in
 	riscv64gc-unknown-linux-musl)
 		export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER:-riscv64-linux-gnu-gcc}"
 		check_linker "$CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER"
+		# 该 target 默认动态 musl，而 CI 只有 glibc 交叉 gcc（没有 musl Scrt1.o）。
+		# 强制静态 musl，并使用 Rust 自带的 musl crt/libc，避免依赖工具链 sysroot。
+		_rv_flags="${CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS:-}"
+		case " $_rv_flags " in
+			*"+crt-static"*) ;;
+			*) _rv_flags="$_rv_flags -C target-feature=+crt-static" ;;
+		esac
+		case " $_rv_flags " in
+			*"link-self-contained=yes"*) ;;
+			*) _rv_flags="$_rv_flags -C link-self-contained=yes" ;;
+		esac
+		export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="$_rv_flags"
 		;;
 	mipsel-unknown-linux-musl)
 		if [ -z "${MIPSEL_SF_GCC:-}" ] \
@@ -111,6 +123,17 @@ esac
 
 # ---------- 编译 + 打包 ----------
 ./packaging/openwrt/scripts/cross-build.sh "$TRIPLE"
+
+# riscv64gc musl 默认动态链接；CI 用 glibc 交叉 gcc 时缺少 musl Scrt1.o。
+# 上面强制 crt-static 后必须校验产物确实是静态链接，避免“构建成功但链接到
+# 错误 libc/解释器”的静默问题。
+if [ "$TRIPLE" = "riscv64gc-unknown-linux-musl" ]; then
+	if ! file packaging/openwrt/staging/autheap | grep -q 'statically linked'; then
+		echo "[!] riscv64 产物不是静态链接：" >&2
+		file packaging/openwrt/staging/autheap >&2 || true
+		exit 1
+	fi
+fi
 
 ./packaging/openwrt/scripts/build-ipk.sh \
 	--arch "$IPK_ARCH" --version "$VERSION" \

@@ -15,7 +15,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=AuthEAP-Client
-PKG_VERSION:=0.1.42
+PKG_VERSION:=0.1.43
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-3.0
@@ -57,6 +57,8 @@ define Package/AuthEAP-Client/install
 	$(INSTALL_DATA) ./root/etc/config/autheap-client $(1)/etc/config/autheap-client
 	$(INSTALL_BIN) ./root/usr/libexec/autheap-client/gen-config \
 		$(1)/usr/libexec/autheap-client/gen-config
+	$(INSTALL_BIN) ./root/usr/libexec/autheap-client/mline-setup \
+		$(1)/usr/libexec/autheap-client/mline-setup
 endef
 
 $(eval $(call BuildPackage,AuthEAP-Client))

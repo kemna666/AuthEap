@@ -33,6 +33,10 @@ pub struct Cli {
     #[arg(short = 'c', long = "config", value_name = "FILE")]
     pub config: Option<String>,
 
+    /// 认证状态文件（LuCI 状态页读取；多线模式下每线不同）
+    #[arg(long = "state-file", value_name = "FILE")]
+    pub state_file: Option<String>,
+
     /// 把日志追加写入该文件（立即 flush；守护模式下也不会丢日志）
     #[arg(long = "log-file", value_name = "FILE")]
     pub log_file: Option<String>,
@@ -208,6 +212,11 @@ impl Cli {
                 BackendArg::Raw => Backend::Raw,
                 BackendArg::Pcap => Backend::Pcap,
             };
+        }
+        if let Some(v) = self.state_file {
+            if !v.trim().is_empty() {
+                cfg.state_file = v.trim().to_string();
+            }
         }
         if let Some(v) = self.log_file {
             cfg.log_file = if v.trim().is_empty() { None } else { Some(v) };

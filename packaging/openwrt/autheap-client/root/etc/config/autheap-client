@@ -2,6 +2,7 @@ config autheap-client 'main'
 	option enabled '0'
 	option daemon '0'
 	option boot_delay '600'      # 开机自启后等待 N 秒再认证；0=立即
+	option mline '0'             # 多线多拨：1=按 line section 启动多个认证实例
 	option ifname 'eth0'
 	option username ''
 	option password ''

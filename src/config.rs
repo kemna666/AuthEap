@@ -121,6 +121,8 @@ pub struct Config {
     // 日志
     /// 日志文件（追加写入，立即 flush）；None = 只写 stderr
     pub log_file: Option<String>,
+    /// 认证状态文件路径（多线模式下每条线路独立；默认 /var/run/autheap-client.auth）
+    pub state_file: String,
     /// 单个日志文件大小上限（KB）；超过则自动轮转清理
     pub log_max_kb: u64,
     /// 保留的历史日志份数（.1/.2/…），0 表示超限直接清空
@@ -172,6 +174,7 @@ impl Default for Config {
             fake_serial: None,
             rj_options: Vec::new(),
             log_file: None,
+            state_file: "/var/run/autheap-client.auth".to_string(),
             log_max_kb: 256,
             log_keep: 3,
             log_rotate_secs: 300,
@@ -315,6 +318,9 @@ impl Config {
             }
             // 日志
             "log_file" | "logfile" | "log" => self.log_file = opt_string(v),
+            "state_file" | "statefile" | "auth_state_file" => {
+                self.state_file = v.to_string()
+            }
             "log_max_kb" | "log_max_kbytes" | "log_size" => {
                 self.log_max_kb = parse_u64(v).ok_or_else(bad)?
             }
@@ -428,7 +434,8 @@ mod tests {
              beacon_interval = 15\n\
              beacon_payload = 00112233aabb\n\
              restart_on_logoff = yes\n\
-             boot_delay = 600\n",
+             boot_delay = 600\n\
+             state_file = /tmp/autheap.state\n",
         )
         .unwrap();
 
@@ -450,6 +457,7 @@ mod tests {
         );
         assert!(cfg.restart_on_logoff);
         assert_eq!(cfg.boot_delay, 600);
+        assert_eq!(cfg.state_file, "/tmp/autheap.state");
         let _ = std::fs::remove_file(&path);
     }
 

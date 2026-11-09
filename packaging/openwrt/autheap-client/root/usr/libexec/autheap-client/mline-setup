@@ -1,0 +1,90 @@
+#!/bin/sh
+# 多线多拨辅助脚本：按 UCI line section 创建/清理 macvlan 接口。
+#
+#   mline-setup setup    创建所有 parent 非空的线路接口
+#   mline-setup cleanup  只删除本脚本创建过的接口
+#
+# 物理多线（parent 留空）不会改动系统接口，只由 init 校验接口是否存在。
+set -eu
+
+CONF='autheap-client'
+STATE_DIR='/var/run/autheap-mline'
+
+log() { echo "[mline] $*" >&2; }
+die() { echo "[mline] $*" >&2; exit 1; }
+
+# 用 section 名生成稳定、本地管理的 MAC（02:4d:4c:xx:xx:xx）。
+gen_mac() {
+	local h
+	h="$(printf '%s' "$1" | md5sum 2>/dev/null | cut -c1-8)"
+	[ -n "$h" ] || h='00000000'
+	printf '02:4d:4c:%s:%s:%s' "$(printf '%s' "$h" | cut -c1-2)" \
+		"$(printf '%s' "$h" | cut -c3-4)" "$(printf '%s' "$h" | cut -c5-6)"
+}
+
+check_macvlan() {
+	command -v ip >/dev/null 2>&1 || die "缺少 ip 命令（OpenWrt 基础系统自带）"
+	if [ ! -d /sys/module/macvlan ] && command -v modprobe >/dev/null 2>&1; then
+		modprobe macvlan 2>/dev/null || true
+	fi
+	[ -d /sys/module/macvlan ] || log "警告：内核未加载 macvlan，创建时可能失败（请安装/加载 kmod-macvlan）"
+}
+
+setup_line() {
+	local section="$1" enabled ifname parent mac state
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" = 1 ] || return 0
+	config_get ifname "$section" ifname ''
+	config_get parent "$section" parent ''
+	config_get mac "$section" mac ''
+
+	[ -n "$ifname" ] || die "线路 $section 未设置 ifname"
+	[ "${#ifname}" -le 15 ] || die "线路 $section 的接口名过长（Linux 最多 15 字符）: $ifname"
+	[ -n "$parent" ] || return 0
+
+	check_macvlan
+	command -v ip >/dev/null 2>&1 || die "缺少 ip 命令"
+	ip link show "$parent" >/dev/null 2>&1 || die "父接口不存在: $parent"
+	[ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR"
+
+	state="$STATE_DIR/$ifname"
+	if ip link show "$ifname" >/dev/null 2>&1; then
+		[ -f "$state" ] || die "接口 $ifname 已存在且不是 mline 创建的，拒绝覆盖"
+		ip link set "$ifname" up 2>/dev/null || true
+		return 0
+	fi
+
+	[ -n "$mac" ] || mac="$(gen_mac "$section")"
+	log "创建 macvlan: $ifname（parent=$parent mac=$mac）"
+	ip link add link "$parent" name "$ifname" type macvlan mode bridge || \
+		die "创建 macvlan 失败：$ifname（确认 kmod-macvlan 已安装）"
+	ip link set dev "$ifname" address "$mac" || { ip link del "$ifname"; die "设置 MAC 失败: $ifname"; }
+	ip link set "$ifname" up || { ip link del "$ifname"; die "启用接口失败: $ifname"; }
+	printf '%s\n' "$parent" > "$state"
+}
+
+setup_all() {
+	. /lib/functions.sh
+	config_load "$CONF"
+	config_foreach setup_line line
+}
+
+cleanup_all() {
+	[ -d "$STATE_DIR" ] || return 0
+	for state in "$STATE_DIR"/*; do
+		[ -f "$state" ] || continue
+		ifname="${state##*/}"
+		if ip link show "$ifname" >/dev/null 2>&1; then
+			log "删除 macvlan: $ifname"
+			ip link del "$ifname" 2>/dev/null || true
+		fi
+		rm -f "$state"
+	done
+	rmdir "$STATE_DIR" 2>/dev/null || true
+}
+
+case "${1:-}" in
+	setup)   setup_all ;;
+	cleanup) cleanup_all ;;
+	*) echo "用法: $0 setup|cleanup" >&2; exit 2 ;;
+esac

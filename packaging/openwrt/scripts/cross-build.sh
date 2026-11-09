@@ -116,6 +116,18 @@ else
     riscv64gc-unknown-linux-musl)
       LINKER_ENV=CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER
       eval "LINKER=\${$LINKER_ENV:-riscv64-linux-gnu-gcc}"
+      # 该 target 默认动态 musl；若链接器是 glibc gcc，会找不到 musl Scrt1.o。
+      # 强制静态 musl + Rust 自带 crt/libc，保证本地与 CI 行为一致。
+      _rv_flags="${CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS:-}"
+      case " $_rv_flags " in
+        *"+crt-static"*) ;;
+        *) _rv_flags="$_rv_flags -C target-feature=+crt-static" ;;
+      esac
+      case " $_rv_flags " in
+        *"link-self-contained=yes"*) ;;
+        *) _rv_flags="$_rv_flags -C link-self-contained=yes" ;;
+      esac
+      export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="$_rv_flags"
       ;;
   esac
   if [ -n "$LINKER_ENV" ]; then

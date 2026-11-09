@@ -178,21 +178,27 @@ return view.extend({
 		o.placeholder = '600';
 		o.description = _('仅开机自启时生效，默认 600 秒；0 = 立即认证。状态页点“启动”会立即认证。');
 
+		o = s.taboption('basic', form.Flag, 'mline', _('多线多拨（mline）'));
+		o.default = '0';
+		o.description = _('启用后忽略上面的单线网卡，改为按下方“多线多拨线路”逐条启动独立认证进程；每条线路可覆盖账号。');
+
 		o = s.taboption('basic', widgets.DeviceSelect, 'ifname', _('认证网卡'));
 		o.noaliases = true;
 		o.rmempty = false;
 		o.default = 'eth0';
-		o.description = _('带系统网卡下拉，也可手动输入设备名。');
+		o.depends('mline', '0');
+		o.description = _('单线模式使用；多线模式请到下方“多线多拨线路”逐条配置。');
 
 		o = s.taboption('basic', form.Value, 'username', _('用户名'));
-		o.rmempty = false;
+		o.rmempty = true;
 		o.placeholder = _('学号 / 账号');
+		o.description = _('单线模式必填；多线模式可留空，由各线路提供或继承。');
 
 		o = s.taboption('basic', form.Value, 'password', _('密码'));
 		o.password = true;
-		o.rmempty = false;
+		o.rmempty = true;
 		o.placeholder = _('请输入认证密码');
-		o.description = _('密码字段保存在 /etc/config/autheap-client 中，请限制该文件的访问权限。');
+		o.description = _('单线模式必填；多线模式可留空由线路提供。密码保存在 /etc/config/autheap-client，请限制该文件权限。');
 
 		o = s.taboption('basic', form.ListValue, 'backend', _('收发包后端'));
 		o.value('raw', _('raw（Linux AF_PACKET，推荐）'));
@@ -346,11 +352,66 @@ return view.extend({
 		o.datatype = 'uinteger';
 		o.default = '30';
 
+		o = s.taboption('advanced', form.Value, 'state_file', _('认证状态文件'));
+		o.default = '/var/run/autheap-client.auth';
+		o.placeholder = '/var/run/autheap-client.auth';
+		o.description = _('状态页读取该文件；单线默认 /var/run/autheap-client.auth，多线每条线路自动独立。');
+
 		o = s.taboption('advanced', form.Value, 'pid_file', _('单实例锁文件'));
 		o.default = '/var/run/autheap.pid';
 		o.placeholder = '/var/run/autheap.pid';
 		o.rmempty = true;
 		o.description = _('默认 /var/run/autheap.pid；填 - 表示不限制单实例（后端识别 - 为空值）。');
+
+		// ================= 多线多拨线路 =================
+		// GridSection 是 LuCI 原生的“表格 + 弹窗编辑 + 增删/排序”控件，比把
+		// 动态 section 硬塞进 NamedSection tab 更稳定；每行对应一个 UCI line section。
+		var sl = m.section(form.GridSection, 'line', _('多线多拨线路'),
+			_('每行一条独立认证线路。父接口非空时自动创建 macvlan（单线多拨）；留空则使用已有物理接口。账号/密码留空继承主配置。'));
+		sl.anonymous = true;
+		sl.addremove = true;
+		sl.sortable = true;
+
+		o = sl.option(form.Flag, 'enabled', _('启用'));
+		o.default = '1';
+		o.editable = true;
+
+		o = sl.option(form.Value, 'ifname', _('接口'));
+		o.rmempty = false;
+		o.placeholder = _('mline0');
+		o.editable = true;
+		o.description = _('实际用于认证的接口，最多 15 个字符；macvlan 线路可填尚不存在的名称。');
+
+		o = sl.option(widgets.DeviceSelect, 'parent', _('父接口'));
+		o.noaliases = true;
+		o.rmempty = true;
+		o.placeholder = _('eth0');
+		o.editable = true;
+		o.description = _('非空时自动创建 macvlan；留空则使用已有接口。');
+
+		o = sl.option(form.Value, 'mac', _('MAC 地址'));
+		o.datatype = 'macaddr';
+		o.rmempty = true;
+		o.placeholder = _('留空自动生成');
+		o.editable = true;
+		o.description = _('仅 macvlan 线路生效；留空按线路名生成稳定的本地管理 MAC。');
+
+		o = sl.option(form.Value, 'username', _('用户名'));
+		o.rmempty = true;
+		o.editable = true;
+		o.placeholder = _('留空继承主账号');
+
+		o = sl.option(form.Value, 'password', _('密码'));
+		o.password = true;
+		o.rmempty = true;
+		o.modalonly = true;
+		o.placeholder = _('留空继承主密码');
+
+		o = sl.option(form.Value, 'dhcp_script', _('DHCP 脚本'));
+		o.rmempty = true;
+		o.modalonly = true;
+		o.placeholder = 'udhcpc -i "$AUTHEAP_IFNAME" -q -n';
+		o.description = _('留空继承主配置；脚本可用 $AUTHEAP_IFNAME 获取当前线路接口。');
 
 		this._map = m;
 		this._enabledOpt = s.getOption('enabled');

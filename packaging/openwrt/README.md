@@ -45,6 +45,7 @@ packaging/openwrt/
 > 三套流水线共用 `scripts/` 下的版本、打包、发布脚本；矩阵覆盖
 > x86_64 / aarch64 / armv7 / armv6 / riscv64 / mipsel_24kc / mips_24kc，
 > 每个架构产出 ipk + apk，另加 LuCI 包与桌面 deb，并统一上传 Release。
+> riscv64 会强制静态 musl（CI 的 glibc 交叉 gcc 找不到 musl Scrt1.o）。
 > 完整启用步骤见 [`docs/codeberg-ci.md`](../../docs/codeberg-ci.md)。本地等价命令见下文。
 
 > **版本号规则**：`0.1.x`，**每编译/构建一次自动把 `x` 加一**（`0.1.42` → `0.1.43` → …）；
@@ -113,8 +114,8 @@ autheap --nettest                    # 留空：只检查本机与默认网关
 
 1. 网页 **网络 → AuthEAP-Client**，配置页使用 LuCI 原生表单与 Tab（`form.NamedSection`
    + `s.tab()`），按**每个插件/功能各自一个 Tab** 组织：
-   - **基本设置**：开机自启、开机延迟认证（默认 600 秒）、后台模式、认证网卡、
-     账号密码、后端、重试与超时；
+   - **基本设置**：开机自启、开机延迟认证（默认 600 秒）、多线多拨（mline）、
+     后台模式、认证网卡、账号密码、后端、重试与超时；
    - **插件**：原生多选下拉，选项和说明由 `autheap --list-plugins` 动态生成；
      也可输入列表外的自定义插件名（需已编译进客户端），并显示 printer 的“打印收到的帧”；
    - **锐捷**：锐捷 v3/v4 插件参数（心跳间隔、EAPOL 广播地址、DHCP 方式/脚本、
@@ -166,6 +167,7 @@ autheap --nettest                    # 留空：只检查本机与默认网关
 config autheap-client 'main'
 	option enabled '0'           # 开机自启（以 /etc/rc.d 软链为准，init/LuCI 会同步）
 	option boot_delay '600'       # 开机自启后等待 N 秒再认证；0=立即
+	option mline '0'              # 多线多拨总开关
 	option daemon '0'            # 后台守护模式（一般交给 procd）
 	option ifname 'eth0'         # 认证网卡
 	option username ''
@@ -202,6 +204,31 @@ config autheap-client 'main'
 	option log_rotate_secs '300'  # 检查/自动清理间隔（秒）
 	option pid_file '/var/run/autheap.pid'  # 单实例锁；- 表示不限制
 ```
+
+### 多线多拨（mline）
+
+`option mline '1'` 后，init 会忽略 `main.ifname`，改为遍历 `config line`，
+每条线路启动一个独立 procd 实例（独立配置/状态/pid/日志）：
+
+```
+config line 'line1'
+	option enabled '1'
+	option ifname 'mline0'       # 实际认证接口（≤15 字符）
+	option parent 'eth0'         # 非空：自动创建 macvlan；留空：用现有接口
+	option mac ''                # 留空按线路名生成稳定 MAC
+	option username ''           # 留空继承 main
+	option password ''           # 留空继承 main
+	option dhcp_script ''        # 留空继承 main；可用 $AUTHEAP_IFNAME
+```
+
+- 物理多线：`parent` 留空，`ifname` 填 `eth1`/`eth2`；
+- 单线多拨：同一 `parent=eth0` 配多条线路，各自不同 `ifname`/`mac`；
+- 线路状态文件 `/var/run/autheap-client.<line>.auth`，日志
+  `/var/log/autheap-client.<line>.log`（默认命名）；
+- 停止时只删除由 mline 创建的 macvlan；用户原有接口不会被删除；
+- macvlan 需要内核支持；先安装 `kmod-macvlan`（`opkg install kmod-macvlan` 或
+  `apk add kmod-macvlan`），创建失败会在 init 日志和线路日志中提示；
+- 每条线路认证成功后的 DHCP/负载均衡策略由用户按需配置（例如 `udhcpc` + mwan3）。
 
 ## 配置文件（后端据此认证）
 

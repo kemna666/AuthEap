@@ -22,6 +22,7 @@ PIDFILE=/var/run/autheap-client.pid
 LOGFILE=/var/log/autheap-client.log
 CONF_FILE=/etc/autheap-client.conf
 GENCONF=/usr/libexec/autheap-client/gen-config
+MLINE_SETUP=/usr/libexec/autheap-client/mline-setup
 
 # ---------------------------------------------------------------------------
 # enable / disable：开机自启 = /etc/rc.d 下的 S/K 软链。
@@ -54,6 +55,68 @@ boot() {
 	start "$@"
 }
 
+line_log_file() {
+	local section="$1" lf='' base=''
+	config_get lf "$section" log_file ''
+	if [ -n "$lf" ]; then
+		printf '%s' "$lf"
+		return
+	fi
+	config_get base main log_file "$LOGFILE"
+	[ -n "$base" ] || base="$LOGFILE"
+	case "$base" in
+		*.log) printf '%s' "${base%.log}.$section.log" ;;
+		*)     printf '%s' "$base.$section" ;;
+	esac
+}
+
+# 启动一个认证实例：单线模式 name=main；多线模式 name=线路 section 名。
+start_one() {
+	local name="$1" conf="$2" user="$3" pass="$4" log="$5" pid="$6"
+	mkdir -p "$(dirname "$log")" 2>/dev/null || true
+	[ -f "$log" ] || : > "$log" 2>/dev/null || true
+	echo "[init] $(date '+%Y-%m-%d %H:%M:%S') 实例=$name 用户=$user 密码长度=${#pass} 配置=$conf" >> "$log" 2>/dev/null
+
+	if [ "$MLINE_DAEMON" = "1" ]; then
+		/bin/sh -c "exec $PROG --daemon --config \"$conf\" >/dev/null 2>>\"$log\"" &
+		return 0
+	fi
+
+	procd_open_instance "$name"
+	procd_set_param env "AUTHEAP_PASSWORD=$pass" "AUTHEAP_BOOT_START=$AUTHEAP_BOOT_START"
+	procd_set_param command /bin/sh -c "exec >/dev/null 2>>\"$log\"; exec $PROG --config \"$conf\""
+	procd_set_param pidfile "$pid"
+	procd_close_instance
+}
+
+start_mline_line() {
+	local section="$1" enabled ifname user pass conf log pid
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" = "1" ] || return 0
+	config_get ifname "$section" ifname ''
+	[ -n "$ifname" ] || {
+		echo "[mline] 线路 $section 未设置 ifname" >&2
+		MLINE_FAILED=1
+		return 0
+	}
+	config_get user "$section" username "$MAIN_USERNAME"
+	config_get pass "$section" password "$MAIN_PASSWORD"
+	[ -n "$user" ] || user="$MAIN_USERNAME"
+	[ -n "$pass" ] || pass="$MAIN_PASSWORD"
+	conf="/etc/autheap-client.$section.conf"
+	if ! "$GENCONF" "$conf" "$section" >/dev/null 2>&1; then
+		echo "[mline] 线路 $section 生成配置失败" >&2
+		echo "[mline] $( "$GENCONF" "$conf" "$section" 2>&1 )" >&2
+		MLINE_FAILED=1
+		return 0
+	fi
+	log="$(line_log_file "$section")"
+	config_get pid "$section" pid_file "/var/run/autheap-client.$section.pid"
+	[ -n "$pid" ] || pid="/var/run/autheap-client.$section.pid"
+	MLINE_COUNT=$((MLINE_COUNT + 1))
+	start_one "$section" "$conf" "$user" "$pass" "$log" "$pid" || MLINE_FAILED=1
+}
+
 start_service() {
 	config_load autheap-client
 
@@ -64,16 +127,20 @@ start_service() {
 	config_get username main username ""
 	config_get password main password ""
 	config_get_bool daemon main daemon 0
+	config_get_bool mline main mline 0
+	MLINE_DAEMON="$daemon"
 
-	if [ -z "$username" ]; then
-		echo "启动失败：UCI 未设置用户名（autheap-client.main.username）"
-		logger -t autheap-client "username not set; refusing to start"
-		return 1
-	fi
-	if [ -z "$password" ]; then
-		echo "启动失败：UCI 未设置密码（autheap-client.main.password）"
-		logger -t autheap-client "password not set; refusing to start"
-		return 1
+	if [ "$mline" != "1" ]; then
+		if [ -z "$username" ]; then
+			echo "启动失败：UCI 未设置用户名（autheap-client.main.username）"
+			logger -t autheap-client "username not set; refusing to start"
+			return 1
+		fi
+		if [ -z "$password" ]; then
+			echo "启动失败：UCI 未设置密码（autheap-client.main.password）"
+			logger -t autheap-client "password not set; refusing to start"
+			return 1
+		fi
 	fi
 
 	[ -x "$PROG" ] || {
@@ -91,7 +158,39 @@ start_service() {
 	mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null || true
 	[ -f "$LOGFILE" ] || : > "$LOGFILE" 2>/dev/null || true
 
-	# 1) UCI → 配置文件（后端认证实际读取的就是它）
+	# ---------- 多线多拨 ----------
+	if [ "$mline" = "1" ]; then
+		[ -x "$MLINE_SETUP" ] || {
+			echo "启动失败：缺少多线辅助脚本 $MLINE_SETUP"
+			return 1
+		}
+		if ! "$MLINE_SETUP" setup; then
+			echo "启动失败：创建多线 macvlan 接口失败"
+			logger -t autheap-client "mline setup failed"
+			"$MLINE_SETUP" cleanup 2>/dev/null || true
+			return 1
+		fi
+		# 仍生成一份 main 配置，供配置页查看/排错；认证实际用各线路配置。
+		"$GENCONF" "$CONF_FILE" >/dev/null 2>&1 || true
+		MLINE_COUNT=0
+		MLINE_FAILED=0
+		MAIN_USERNAME="$username"
+		MAIN_PASSWORD="$password"
+		config_foreach start_mline_line line
+		if [ "$MLINE_COUNT" = "0" ]; then
+			echo "启动失败：mline 已启用但没有启用的线路"
+			logger -t autheap-client "mline enabled but no line"
+			return 1
+		fi
+		[ "$MLINE_FAILED" = "0" ] || {
+			echo "启动完成，但有线路启动失败；请查看 /var/log/autheap-client.<line>.log"
+			logger -t autheap-client "mline partial start failure"
+			return 1
+		}
+		return 0
+	fi
+
+	# ---------- 单线模式 ----------
 	if ! "$GENCONF" "$CONF_FILE" >/dev/null 2>&1; then
 		echo "启动失败：gen-config 生成 $CONF_FILE 出错"
 		logger -t autheap-client "gen-config failed"
@@ -102,24 +201,7 @@ start_service() {
 		logger -t autheap-client "empty $CONF_FILE"
 		return 1
 	}
-
-	# 记录本次启动（密码只记长度），便于与 CLI 对照排查
-	echo "[init] $(date '+%Y-%m-%d %H:%M:%S') 用户=$username 密码长度=${#password} 插件配置见 $CONF_FILE" >> "$LOGFILE" 2>/dev/null
-
-	# 2) 启动后端：只传 --config，其余参数全部来自配置文件
-	if [ "$daemon" = "1" ]; then
-		# 守护模式：不交给 procd 托管（停止用 killall）；日志由后端自己写文件
-		/bin/sh -c "exec $PROG --daemon --config \"$CONF_FILE\" >/dev/null 2>>\"$LOGFILE\"" &
-		return 0
-	fi
-
-	procd_open_instance
-	procd_set_param env "AUTHEAP_PASSWORD=$password" "AUTHEAP_BOOT_START=$AUTHEAP_BOOT_START"
-	# stdout 丢弃、stderr（崩溃/启动错误）追加到日志；正常日志由后端写入配置里的 log_file
-	procd_set_param command /bin/sh -c "exec >/dev/null 2>>\"$LOGFILE\"; exec $PROG --config \"$CONF_FILE\""
-	procd_set_param pidfile "$PIDFILE"
-	# 不设置 respawn：客户端自身有重试逻辑，避免失败时 procd 疯狂重启刷屏
-	procd_close_instance
+	start_one main "$CONF_FILE" "$username" "$password" "$LOGFILE" "$PIDFILE"
 }
 
 stop_service() {
@@ -167,6 +249,12 @@ service_stopped() {
 		echo "已停止 autheap 进程"
 	else
 		echo "服务当前未运行（无需停止）"
+	fi
+	# 多线模式：进程停止后再删除本脚本创建的 macvlan，避免拆掉仍在认证的接口。
+	# 无论当前是否仍启用 mline，都清理一次状态目录；切换配置后停止服务
+	# 也能把上一次创建的 macvlan 收干净（脚本只删自己记录过的接口）。
+	if [ -x "$MLINE_SETUP" ]; then
+		"$MLINE_SETUP" cleanup 2>&1 || true
 	fi
 	return 0
 }

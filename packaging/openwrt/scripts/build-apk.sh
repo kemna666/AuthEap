@@ -3,7 +3,7 @@
 #
 # 用法:
 #   build-apk.sh --arch aarch64 \
-#                [--version 0.1.42] [--release 1] \
+#                [--version 0.1.43] [--release 1] \
 #                [--binary staging/autheap]
 # 输出: staging/AuthEAP-Client-<version>-r<release>_<arch>.apk
 #
@@ -48,9 +48,12 @@ cp "$FILES_ROOT/etc/init.d/autheap-client" "$WORK/pkg/etc/init.d/autheap-client"
 cp "$FILES_ROOT/etc/config/autheap-client"  "$WORK/pkg/etc/config/autheap-client"
 cp "$FILES_ROOT/usr/libexec/autheap-client/gen-config" \
    "$WORK/pkg/usr/libexec/autheap-client/gen-config"
+cp "$FILES_ROOT/usr/libexec/autheap-client/mline-setup" \
+   "$WORK/pkg/usr/libexec/autheap-client/mline-setup"
 chmod 0755 "$WORK/pkg/usr/bin/autheap"
 chmod 0755 "$WORK/pkg/etc/init.d/autheap-client"
 chmod 0755 "$WORK/pkg/usr/libexec/autheap-client/gen-config"
+chmod 0755 "$WORK/pkg/usr/libexec/autheap-client/mline-setup"
 chmod 0600 "$WORK/pkg/etc/config/autheap-client"
 
 # OpenWrt apk 的 libc 依赖使用 so:libc.musl-<soname>.so.1。

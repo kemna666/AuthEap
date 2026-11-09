@@ -110,7 +110,13 @@ impl SessionHost for SessionHostImpl<'_> {
             return;
         }
         crate::log_info!("执行 DHCP 脚本: {cmd}");
-        let _ = std::process::Command::new("sh").arg("-c").arg(cmd).status();
+        // 多线多拨时同一条脚本会被多个进程执行；通过环境变量告知当前接口，
+        // 脚本可以写 `udhcpc -i "$AUTHEAP_IFNAME"`，无需为每条线复制脚本。
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .env("AUTHEAP_IFNAME", self.io.ifname())
+            .status();
     }
 }
 
@@ -162,7 +168,10 @@ impl App {
 
     /// 把当前认证状态写入状态文件（供 LuCI 状态页读取；失败静默忽略）
     fn write_auth_state(&self, state: &str) {
-        let _ = std::fs::write("/var/run/autheap-client.auth", state);
+        if self.cfg.state_file.is_empty() {
+            return;
+        }
+        let _ = std::fs::write(&self.cfg.state_file, state);
     }
 
     /// 发送帧（先按顺序交给插件 prepare）

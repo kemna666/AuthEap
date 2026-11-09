@@ -172,8 +172,10 @@ return view.extend({
 					_('当前日志（文件不存在：') + (st.log_file || _('未知路径')) + '）'));
 
 			files.forEach(function (f) {
-				elFiles.appendChild(E('option', { 'value': f.id || '' },
-					(f.id ? (_('历史 ') + f.name) : (_('当前 ') + f.name)) + '（' + kb(f.size) + '）'));
+				var id = String(f.id || '');
+				var prefix = id.indexOf('line:') === 0 ? _('线路 ') : (id ? _('历史 ') : _('当前 '));
+				elFiles.appendChild(E('option', { 'value': id },
+					prefix + f.name + '（' + kb(f.size) + '）'));
 			});
 
 			if (!files.length) {

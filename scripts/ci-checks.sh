@@ -12,6 +12,7 @@ done
 for f in \
 	packaging/openwrt/autheap-client/root/etc/init.d/autheap-client \
 	packaging/openwrt/autheap-client/root/usr/libexec/autheap-client/gen-config \
+	packaging/openwrt/autheap-client/root/usr/libexec/autheap-client/mline-setup \
 	packaging/openwrt/luci-app-autheap-client/root/usr/libexec/rpcd/luci.autheap_client
 do
 	if sh -n "$f"; then echo "  OK  $f"; else echo "  ERR $f"; fail=1; fi

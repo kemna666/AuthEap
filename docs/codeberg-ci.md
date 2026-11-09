@@ -56,12 +56,15 @@ CI 按 **ABI 代表性架构** 矩阵构建；同一个二进制可以覆盖同 
 | `aarch64_cortex-a53` | `aarch64-unknown-linux-musl` | `aarch64-linux-gnu-gcc` | ARM64，可改 cortex-a72 等 |
 | `arm_cortex-a7_neon-vfpv4` | `armv7-unknown-linux-musleabihf` | `arm-linux-gnueabihf-gcc` | ARMv7，可覆盖 cortex-a9/a15 |
 | `arm_arm1176jzf-s_vfp` | `arm-unknown-linux-musleabihf` | `arm-linux-gnueabihf-gcc` | 老 ARMv6 |
-| `riscv64_riscv64` | `riscv64gc-unknown-linux-musl` | `riscv64-linux-gnu-gcc` | RISC-V 64 |
+| `riscv64_riscv64` | `riscv64gc-unknown-linux-musl` | `riscv64-linux-gnu-gcc` + 强制静态 musl | RISC-V 64 |
 | `mipsel_24kc` | `mipsel-unknown-linux-musl` | musl.cc `mipsel-linux-muslsf-cross` | MT7621 等，软浮点 |
 | `mips_24kc` | `mips-unknown-linux-musl` | musl.cc `mips-linux-muslsf-cross` | 大端 MIPS，软浮点 |
 
 - `mipsel` / `mips` 的 Rust 标准库没有预编译版本，CI 会用 `-Z build-std` 和
   对应的 soft-float musl 工具链；`scripts/ci-build-package.sh` 会自动下载。
+- `riscv64gc-unknown-linux-musl` 默认是动态 musl；CI 只有 glibc 交叉 gcc 时
+  会缺少 `Scrt1.o`。构建脚本会强制 `+crt-static` 和 `link-self-contained=yes`，
+  并在打包前校验 `statically linked`，避免链接到错误 libc。
 - 每种架构生成一对 `AuthEAP-Client_<ver>-1_<arch>.ipk` 和
   `AuthEAP-Client-<ver>-r1_<arch>.apk`；文件名带架构，避免互相覆盖。
 - 桌面 `.deb` 只在 x86_64 构建一份；它和所有路由架构的 ipk/apk、LuCI 包

@@ -7,7 +7,7 @@ PKG_DIR="$REPO/packaging/openwrt"
 STAGE="$PKG_DIR/staging"
 FILES_ROOT="$PKG_DIR/autheap-client/root"
 
-DEFAULT_VERSION="0.1.42"
+DEFAULT_VERSION="0.1.43"
 DEFAULT_RELEASE="1"
 DEFAULT_MAINTAINER="AuthEAP-Client contributors"
 DEFAULT_DESC="可扩展的 802.1x (EAP-MD5) 客户端（锐捷 v3/v4 插件，Rust 版）"

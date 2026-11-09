@@ -76,12 +76,26 @@ log_file_effective() {
 	printf '%s' "$f"
 }
 
+# 单线认证状态文件：优先取后端实际配置，其次 UCI，最后默认值。
+auth_file_effective() {
+	local f=''
+	if [ -r "$CONF_FILE" ]; then
+		f="$(sed -n 's/^[[:space:]]*state_file[[:space:]]*=[[:space:]]*//p' "$CONF_FILE" 2>/dev/null | head -n1)"
+	fi
+	[ -n "$f" ] || f="$(uci -q get "$CONF.main.state_file" 2>/dev/null)"
+	[ -n "$f" ] || f="/var/run/autheap-client.auth"
+	printf '%s' "$f"
+}
+
 # 日志文件/历史文件路径（id: '' 或 0 = 当前；1..9 = .1/.2…）
 log_path_of() {
-	local base="$(log_file_effective)"
-	case "$1" in
+	local base="$(log_file_effective)" id="${1:-}"
+	case "$id" in
+		line:*) local sec="${id#line:}"; line_log_file "$sec"; return ;;
+	esac
+	case "$id" in
 		''|0) printf '%s' "$base" ;;
-		1|2|3|4|5|6|7|8|9) printf '%s.%s' "$base" "$1" ;;
+		1|2|3|4|5|6|7|8|9) printf '%s.%s' "$base" "$id" ;;
 		*) printf '%s' "$base" ;;
 	esac
 }
@@ -120,6 +134,54 @@ plugins_list() {
 	fi
 }
 
+# ---------- 多线多拨辅助 ----------
+line_sections() {
+	uci show "$CONF" 2>/dev/null | sed -n 's/^autheap-client\.\([^.]*\)=line$/\1/p'
+}
+
+line_get() { # line_get <section> <option> <default>
+	local v
+	v="$(uci -q get "$CONF.$1.$2" 2>/dev/null)"
+	[ -n "$v" ] || v="$3"
+	printf '%s' "$v"
+}
+
+line_bval() { # line_bval <section> <option> <default>
+	case "$(line_get "$1" "$2" "$3")" in
+		1|true|on|yes|enable|enabled) printf '1' ;;
+		*) printf '0' ;;
+	esac
+}
+
+line_auth_file() {
+	line_get "$1" state_file "/var/run/autheap-client.$1.auth"
+}
+
+line_log_file() {
+	local lf
+	lf="$(uci -q get "$CONF.$1.log_file" 2>/dev/null)"
+	if [ -n "$lf" ]; then
+		printf '%s' "$lf"
+	else
+		case "$(log_file_effective)" in
+			*.log) printf '%s' "$(log_file_effective | sed 's/\.log$/.'"$1"'.log/')" ;;
+			*)     printf '%s.%s' "$(log_file_effective)" "$1" ;;
+		esac
+	fi
+}
+
+line_pid_file() {
+	line_get "$1" pid_file "/var/run/autheap-client.$1.pid"
+}
+
+line_running() {
+	local pf pid
+	pf="$(line_pid_file "$1")"
+	[ -n "$pf" ] && [ -f "$pf" ] || return 1
+	pid="$(cat "$pf" 2>/dev/null | tr -dc '0-9')"
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 # 追加日志文件列表（字段名 log_files）到当前 json 对象。
 # 同时给 status 与 log_files 两个方法复用：status 的 ACL 一直有授权，
 # 因此即使新版 ACL 尚未生效（未重启 rpcd / 未重新登录），「日志」页也能列出文件。
@@ -137,6 +199,19 @@ emit_log_files() {
 		json_add_int size "$sz"
 		json_close_object
 	done
+	# 多线线路日志（每线独立文件）
+	local sec lf lsz
+	for sec in $(line_sections); do
+		lf="$(line_log_file "$sec")"
+		[ -f "$lf" ] || continue
+		lsz="$(wc -c < "$lf" 2>/dev/null | tr -dc '0-9')"
+		[ -n "$lsz" ] || lsz=0
+		json_add_object
+		json_add_string id "line:$sec"
+		json_add_string name "线路 $sec: ${lf##*/}"
+		json_add_int size "$lsz"
+		json_close_object
+	done
 	json_close_array
 }
 
@@ -146,6 +221,7 @@ emit_config() {
 	json_add_boolean enabled      "$(boot_enabled)"
 	json_add_boolean enabled_uci  "$(bval enabled 0)"
 	json_add_boolean daemon       "$(bval daemon 0)"
+	json_add_boolean mline        "$(bval mline 0)"
 	json_add_int     boot_delay   "$(ival boot_delay 600)"
 	json_add_string  ifname       "$(getval ifname eth0)"
 	json_add_string  username     "$(getval username '')"
@@ -176,6 +252,7 @@ emit_config() {
 	json_add_boolean restart_on_logoff "$(bval restart_on_logoff 1)"
 	json_add_int     wait_after_fail "$(ival wait_after_fail 30)"
 	json_add_string  pid_file     "$(getval pid_file /var/run/autheap.pid)"
+	json_add_string  state_file   "$(getval state_file /var/run/autheap-client.auth)"
 	# beacon 保活插件
 	json_add_string  beacon_dst      "$(getval beacon_dst '')"
 	json_add_int     beacon_port     "$(ival beacon_port 8083)"
@@ -200,7 +277,7 @@ regen_config() {
 do_set() {
 	local changed=0 k v nv _t p cur
 	json_load "$1"
-	for k in enabled daemon plugin_rjv3 plugin_printer plugin_stats printer_log_recv restart_on_logoff; do
+	for k in enabled daemon mline plugin_rjv3 plugin_printer plugin_stats printer_log_recv restart_on_logoff; do
 		json_get_var v "$k"
 		[ -n "$v" ] || continue
 		case "$v" in true|1|on|yes) nv=1;; *) nv=0;; esac
@@ -217,7 +294,7 @@ do_set() {
 	# 注意要区分“选项不存在”和“选项存在但为空”：前者不写，后者写空值（例如
 	# pid_file 留空 = 不限制单实例）。
 	for k in ifname username password backend extra_plugins dhcp_script service version_str \
-	         fake_dns1 fake_dns2 fake_serial beacon_dst beacon_payload log_file pid_file; do
+	         fake_dns1 fake_dns2 fake_serial beacon_dst beacon_payload log_file pid_file state_file; do
 		json_get_type _t "$k"
 		[ "$_t" = "string" ] || continue
 		json_get_var v "$k"
@@ -302,7 +379,7 @@ do_status() {
 	json_add_boolean enabled "$(boot_enabled)"
 	json_add_boolean enabled_uci "$(bval enabled 0)"
 	json_add_boolean running "$(pidof autheap >/dev/null 2>&1 && echo 1 || echo 0)"
-	json_add_string auth "$([ -f /var/run/autheap-client.auth ] && cat /var/run/autheap-client.auth 2>/dev/null || echo unknown)"
+	json_add_string auth "$([ -f "$(auth_file_effective)" ] && cat "$(auth_file_effective)" 2>/dev/null || echo unknown)"
 	local pkgver binver
 	pkgver="$(sed -n 's/^Version: //p' /usr/lib/opkg/info/AuthEAP-Client.control 2>/dev/null | head -n1)"
 	[ -n "$pkgver" ] || pkgver="$(sed -n 's/^Version: //p' /usr/lib/opkg/info/autheap-client.control 2>/dev/null | head -n1)"
@@ -314,6 +391,32 @@ do_status() {
 	# 密码长度：只暴露长度不暴露内容，便于判断“LuCI 里改了密码但启动时用的还是旧值”
 	json_add_int pwdlen "$(getval password '' | wc -c | tr -dc '0-9')"
 	json_add_string ifname   "$(getval ifname eth0)"
+	json_add_boolean mline   "$(bval mline 0)"
+	# 多线状态：每个 line section 一条独立记录；单线模式数组为空。
+	json_add_array lines
+	local sec en ifn un run auth st logf pidf
+	for sec in $(line_sections); do
+		en="$(line_bval "$sec" enabled 1)"
+		ifn="$(line_get "$sec" ifname '')"
+		un="$(line_get "$sec" username "$(getval username '')")"
+		if line_running "$sec"; then run=1; else run=0; fi
+		st="$(line_auth_file "$sec")"
+		auth='unknown'
+		[ -f "$st" ] && auth="$(cat "$st" 2>/dev/null || echo unknown)"
+		logf="$(line_log_file "$sec")"
+		pidf="$(line_pid_file "$sec")"
+		json_add_object
+		json_add_string name "$sec"
+		json_add_boolean enabled "$en"
+		json_add_string ifname "$ifn"
+		json_add_string username "$un"
+		json_add_boolean running "$run"
+		json_add_string auth "$auth"
+		json_add_string log_file "$logf"
+		json_add_string pid_file "$pidf"
+		json_close_object
+	done
+	json_close_array
 	json_add_object plugins
 		local p rjv3 printer stats beacon extra plugins
 		plugins="$(plugins_list)"
@@ -435,6 +538,12 @@ do_log_clear() {
 		[ -f "$f" ] && : > "$f" 2>/dev/null
 	done
 	rm -f "$(log_file_effective)".* 2>/dev/null
+	local sec lf
+	for sec in $(line_sections); do
+		lf="$(line_log_file "$sec")"
+		[ -f "$lf" ] && : > "$lf" 2>/dev/null
+		rm -f "$lf".* 2>/dev/null
+	done
 	echo '{"res":true}'
 }
 

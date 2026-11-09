@@ -118,6 +118,61 @@ return view.extend({
 		var elErr = E('div', { 'class': 'alert-message error', 'style': 'display:none' });
 		var elStale = E('div', { 'class': 'alert-message warning', 'style': 'display:none' });
 
+		var elLinesBody = E('tbody');
+		var mlineSection = E('div', { 'class': 'cbi-section', 'style': 'display:none' }, [
+			E('h3', {}, _('多线多拨状态')),
+			E('div', { 'class': 'cbi-section-descr' },
+				_('每条线路独立认证；父接口非空时由 mline-setup 自动创建 macvlan。')),
+			E('div', { 'class': 'cbi-section-node' }, [
+				E('table', { 'class': 'table' }, [
+					E('thead', {}, E('tr', {}, [
+						E('th', {}, _('线路')),
+						E('th', {}, _('接口')),
+						E('th', {}, _('运行')),
+						E('th', {}, _('认证状态')),
+						E('th', {}, _('用户名')),
+						E('th', {}, _('日志'))
+					])),
+					elLinesBody
+				])
+			])
+		]);
+
+		function authLabel(a) {
+			switch (a) {
+				case 'success': return [ _('认证成功'), 'success' ];
+				case 'failed': return [ _('认证失败'), 'important' ];
+				case 'waiting': return [ _('等待开机延迟'), 'warning' ];
+				case 'connecting': return [ _('认证中…'), 'warning' ];
+				default: return [ _('未知'), '' ];
+			}
+		}
+
+		function renderLines(lines) {
+			lines = Array.isArray(lines) ? lines : [];
+			while (elLinesBody.firstChild)
+				elLinesBody.removeChild(elLinesBody.firstChild);
+			if (!lines.length) {
+				elLinesBody.appendChild(E('tr', {}, E('td', { 'colspan': 6 },
+					_('未配置线路；到“配置 → 多线多拨线路”添加。'))));
+				return;
+			}
+			lines.forEach(function (ln) {
+				var lab = authLabel(String(ln.auth || 'unknown'));
+				var run = truthy(ln.enabled)
+					? (truthy(ln.running) ? _('是') : _('否'))
+					: _('已禁用');
+				elLinesBody.appendChild(E('tr', {}, [
+					E('td', {}, ln.name || '-'),
+					E('td', {}, ln.ifname || '-'),
+					E('td', {}, run),
+					E('td', {}, E('span', { 'class': 'label ' + lab[1] }, lab[0])),
+					E('td', {}, ln.username || '-'),
+					E('td', {}, E('code', {}, ln.log_file || '-'))
+				]));
+			});
+		}
+
 		var autoChk = E('input', { 'type': 'checkbox', 'checked': true });
 		var bootBtn = E('button', { 'class': 'cbi-button cbi-button-neutral' }, _('开机自启'));
 
@@ -131,6 +186,19 @@ return view.extend({
 			var boot = truthy(state.enabled);
 			var running = truthy(state.running);
 			var auth = String(state.auth || 'unknown');
+			var lines = Array.isArray(state.lines) ? state.lines : [];
+			if (truthy(state.mline)) {
+				var seen = lines.map(function (ln) { return String(ln.auth || 'unknown'); });
+				if (seen.indexOf('success') >= 0) auth = 'success';
+				else if (seen.indexOf('failed') >= 0) auth = 'failed';
+				else if (seen.indexOf('waiting') >= 0) auth = 'waiting';
+				else if (seen.indexOf('connecting') >= 0) auth = 'connecting';
+				else auth = 'unknown';
+				mlineSection.style.display = '';
+			}
+			else {
+				mlineSection.style.display = 'none';
+			}
 
 			if (!running) {
 				elAuth.textContent = _('未运行');
@@ -156,7 +224,9 @@ return view.extend({
 			elBoot.textContent = boot ? _('是') : _('否');
 			elBootDelay.textContent = (typeof state.boot_delay === 'number' ? state.boot_delay : 600) + _(' 秒');
 			elRun.textContent = running ? _('是') : _('否');
-			elIfname.textContent = state.ifname || '-';
+			elIfname.textContent = truthy(state.mline)
+				? (_('多线（') + lines.length + _(' 条）'))
+				: (state.ifname || '-');
 			elUser.textContent = state.username || '-';
 			elPwd.textContent = (typeof state.pwdlen === 'number' ? state.pwdlen : '-') + _(' 位');
 			elPlug.textContent = fmtPlugins(state.plugins);
@@ -166,6 +236,8 @@ return view.extend({
 				: _('未启用');
 			elVer.textContent = state.version || '-';
 			elCore.textContent = state.core || '-';
+
+			renderLines(lines);
 
 			bootBtn.textContent = boot ? _('关闭开机自启') : _('开启开机自启');
 			bootBtn.setAttribute('data-boot', boot ? '1' : '0');
@@ -368,6 +440,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-map-descr' },
 				_('802.1x 认证状态与服务控制。状态每 2 秒自动刷新；修改设置请到“配置”页。')),
 			statusSection,
+			mlineSection,
 			netSection
 		]);
 	}
