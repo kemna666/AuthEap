@@ -362,6 +362,13 @@ mod tests {
 
         let got = server.join().expect("listener thread");
         assert_eq!(got, expect, "服务端应收到完全一致的载荷");
-        assert!(b.stats().0 >= 1, "成功计数应 ≥ 1");
+
+        // server 在收到 FIN 后可能先于 worker 的 sent.fetch_add(1) 返回；
+        // 这里轮询等待计数，避免调度顺序导致的偶发失败。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while b.stats().0 < 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(b.stats().0 >= 1, "成功计数应 ≥ 1（实际 {}）", b.stats().0);
     }
 }
