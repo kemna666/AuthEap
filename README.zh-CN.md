@@ -28,12 +28,18 @@
   `beacon`（**周期向指定 IP:端口 发送自定义 TCP 数据包**，目标/间隔/载荷可在 LuCI 调整，
   **载荷默认内置**，需要时用 `--beacon-payload` 或 LuCI 覆盖）。
   教程见 `docs/plugin-development.md`。
-- **LuCI 界面（OpenWrt 24.10+）**：配置页按**每个插件/功能各自一个 Tab** 组织
-  —— 基本设置 / 插件 / rjv3 锐捷 / beacon 保活 / 日志（下方固定显示后端配置文件）；
+- **LuCI 界面（OpenWrt 24.10+）**：采用 LuCI 原生表单、Tab、状态区块与按钮样式，
+  配置页按**每个插件/功能各自一个 Tab** 组织 —— 基本设置 / 插件 / 锐捷 / Beacon /
+  日志 / 高级，页面下方可查看后端实际读取的配置文件；
   另有**实时日志页**（状态页已移除全部日志相关内容），可查看历史 `.1/.2…` 日志。
   状态页自带**网络测试**：填目标 `IP / 主机[:端口]` 后一键检查本机接口/网关/DNS、
   目标域名解析、TCP 连接与 ICMP 连通性（留空只测本机与网关）。详见
   `packaging/openwrt/`。
+- **开机延迟认证**：开机自启默认等待 600 秒再认证（`boot_delay` 可配，0=立即）；
+  开机时由 init 的 `boot()` 传入标记，手动启动或 LuCI 点“启动”则立即认证。
+- **设置同步**：保存并应用 UCI 后会自动重新生成 `/etc/autheap-client.conf`，
+  服务在运行则自动重启；开机自启以 `/etc/rc.d` 软链为准并与 UCI/界面双向同步，
+  关闭自启不会停止当前进程。
 - **配置文件认证**：`autheap --config /etc/autheap-client.conf`——LuCI 保存配置时会把
   UCI 渲染成该文件，服务启动时也自动刷新并用它认证（`key = value` 文本，命令行参数
   优先）。单独跑官方命令也不再需要一长串参数。
@@ -45,9 +51,11 @@
 ## 目录结构
 
 ```
-.github/workflows/        CI/CD（ci.yml：构建测试 + 打包）
-.forgejo/workflows/       CI/CD（自建 Forgejo runner：ci.yml + release.yml 发布）
-scripts/                  版本递增 / 静态检查 / 交叉编译打包 / 发布脚本
+.github/workflows/        GitHub Actions（构建测试 + 打包 + Release）
+.forgejo/workflows/       Forgejo Actions（自建 runner / Codeberg alpha）
+.woodpecker.yml           Codeberg 官方托管 CI（推荐；push/PR 测试，tag/manual 发布）
+docs/codeberg-ci.md       Codeberg CI/CD 启用与排错说明
+scripts/                  版本自动递增 / 静态检查 / 交叉编译打包 / 发布脚本
 src/
 ├── main.rs              入口（信号、守护进程化、日志文件）
 ├── cli.rs               clap 命令行定义
@@ -74,17 +82,19 @@ src/
 
 ## 编译
 
-工程本体是**纯 CLI**，默认在桌面 Linux 上直接 `cargo build` 即可（编译不依赖
-OpenWrt/LuCI 任何内容）：
+工程本体是**纯 CLI**，默认在桌面 Linux 上编译即可（不依赖 OpenWrt/LuCI 任何内容）：
 
 ```bash
-# 默认（raw 后端，Linux）
-cargo build --release
-# 结果在 target/release/autheap
+# 推荐：构建前自动把 patch 版本 +1，再 cargo build --release
+./scripts/build.sh
+# 结果在 target/release/autheap，版本号例如 0.1.42 → 0.1.43
 
 # 如需 pcap 后端（需安装 libpcap 开发库）
 #   Debian/Ubuntu: sudo apt install libpcap-dev
-cargo build --release --features backend-pcap
+./scripts/build.sh --release --features backend-pcap
+
+# 纯开发调试也可以直接 cargo build（不会自动改版本号）
+cargo build --release
 ```
 
 ### 只编译 CLI 并安装到桌面 Linux
@@ -111,23 +121,45 @@ sudo systemctl enable --now autheap
 
 ### 版本号与发布
 
-- **版本号规则：`0.1.x`**，**每发布一次 release 就把 `x` 加一**：
-  `0.1.1` → `0.1.2` → `0.1.3` …（不换主/次版本号，也不用 `-2`、`-r2` 这类发布号来区分）。
+- **版本号规则：`0.1.x`**，**每编译/构建一次自动把 `x` 加一**：
+  `0.1.42` → `0.1.43` → `0.1.44` …（不换主/次版本号，也不用 `-2`、`-r2` 这类发布号来区分）。
 - 包文件名里的 `-1`（apk 为 `-r1`）是包管理器自己的 revision，**发新版本时保持 `1`**。
-- 递增版本号（同时改 `Cargo.toml` 与 `Cargo.lock`）：
+- 自动递增入口：
+  - `./scripts/build.sh`（推荐）：先自动递增，再 `cargo build --release`；
+  - `packaging/openwrt/scripts/cross-build.sh`；
+  - `packaging/desktop/build-desktop.sh` / `build-deb.sh`；
+  - `scripts/ci-build-package.sh`（本地打包）。
+  每次执行这些脚本都会把 `Cargo.toml`、`Cargo.lock` 和各打包脚本默认版本同步到新版本。
+- 直接 `cargo build` 不会改版本号（避免 Cargo 构建循环）；需要自动版本时用
+  `scripts/build.sh`。只查看/手动指定版本仍可用：
 
 ```bash
 ./scripts/bump-version.sh -n          # 只看下一个版本号
-./scripts/bump-version.sh             # 0.1.2 → 0.1.3
-./scripts/bump-version.sh --set 0.1.5 # 指定版本
+./scripts/bump-version.sh             # 0.1.42 → 0.1.43
+./scripts/bump-version.sh --set 0.1.50 # 指定版本
 ```
 
-- **CI 自动处理**：推送 tag（如 `0.1.3`）或手动触发 release 流程时，流水线会取远端
-  同主版本号的最大版本 +1（未发布过的 `Cargo.toml` 版本则原样发布），交叉编译并
-  上传 `.ipk` / `.apk` / `.deb`，然后在 Codeberg/Forgejo 创建 Release。
-- 打包脚本的默认版本号在 `packaging/openwrt/scripts/common.sh`、`build-luci.sh`、
-  `packaging/desktop/build-deb.sh`、`packaging/openwrt/autheap-client/Makefile`，
-  发版时用 `bump-version.sh` 后同步这几处默认值即可（CI 里由 `ci-version.sh` 注入）。
+- 跳过自动递增：`VERSION=x.y.z ./scripts/build.sh`、`AUTHEAP_NO_VERSION_BUMP=1`。
+
+- **CI 自动处理**：
+  - **Codeberg（推荐）**：使用 `.woodpecker.yml`（Woodpecker CI）。push/PR 只做构建、
+    单测和静态检查；推送 tag 或手动 Run pipeline 时才交叉编译 7 类 ABI 架构并发布
+    `.ipk` / `.apk` / `.deb` 到 Codeberg Release。
+  - **Forgejo Actions**：`.forgejo/workflows/*.yml` 适用于自建 runner 或 Codeberg
+    托管 Actions alpha；Release 通过 Forgejo artifact action 聚合后再发布。
+  - 架构矩阵覆盖 x86_64 / aarch64 / armv7 / armv6 / riscv64 / mipsel_24kc /
+    mips_24kc，各架构生成 ipk + apk，另加 x86_64 桌面 deb 和 LuCI 包；
+    全部作为 Release 附件上传。
+  - 两套 Codeberg CI 请**只启用一套**，避免重复构建。完整配置/Secret/排错见
+    [`docs/codeberg-ci.md`](docs/codeberg-ci.md)。
+  - GitHub Actions 仍使用 `.github/workflows/*.yml`，逻辑不变。
+- **CI 版本号来源**：tag 事件直接用 tag；手动发布取远端同主版本号最大版本 +1；
+  普通 push/PR 用 `Cargo.toml` 当前版本。CI 统一设置
+  `AUTHEAP_NO_VERSION_BUMP=1`，由 `ci-version.sh` 只计算一次版本，避免 7 个架构
+  job 各自递增导致版本不一致。
+- 版本号默认值由 `scripts/bump-version.sh` 自动同步到
+  `packaging/openwrt/scripts/common.sh`、`build-luci.sh`、`build-deb.sh`、
+  `packaging/openwrt/autheap-client/Makefile`；一般不需要手工改这些文件。
 
 ## 运行
 

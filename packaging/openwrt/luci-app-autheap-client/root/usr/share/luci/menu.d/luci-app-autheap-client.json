@@ -6,43 +6,48 @@
 			"type": "firstchild"
 		},
 		"depends": {
-			"acl": [ "luci-app-autheap-client" ]
+			"acl": [
+				"luci-app-autheap-client"
+			]
 		}
 	},
-
 	"admin/network/autheapclient/overview": {
-		"title": "状态",
+		"title": "运行状态",
 		"order": 10,
 		"action": {
 			"type": "view",
 			"path": "autheapclient/overview"
 		},
 		"depends": {
-			"acl": [ "luci-app-autheap-client" ]
+			"acl": [
+				"luci-app-autheap-client"
+			]
 		}
 	},
-
 	"admin/network/autheapclient/config": {
-		"title": "配置",
+		"title": "服务配置",
 		"order": 20,
 		"action": {
 			"type": "view",
 			"path": "autheapclient/config"
 		},
 		"depends": {
-			"acl": [ "luci-app-autheap-client" ]
+			"acl": [
+				"luci-app-autheap-client"
+			]
 		}
 	},
-
 	"admin/network/autheapclient/logs": {
-		"title": "日志",
+		"title": "运行日志",
 		"order": 30,
 		"action": {
 			"type": "view",
 			"path": "autheapclient/logs"
 		},
 		"depends": {
-			"acl": [ "luci-app-autheap-client" ]
+			"acl": [
+				"luci-app-autheap-client"
+			]
 		}
 	}
 }

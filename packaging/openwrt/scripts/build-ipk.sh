@@ -3,14 +3,14 @@
 #
 # 用法:
 #   build-ipk.sh --arch aarch64_cortex-a53 \
-#                [--version 0.1.16] [--release 1] \
+#                [--version 0.1.42] [--release 1] \
 #                [--binary staging/autheap]
 # 输出: staging/AuthEAP-Client_<version>-<release>_<arch>.ipk
 set -eu
 . "$(dirname "$0")/common.sh"
 
 ARCH=""
-VERSION="$DEFAULT_VERSION"
+VERSION="$(sed -n 's/^version[ \t]*=[ \t]*"\(.*\)".*/\1/p' "$REPO/Cargo.toml" | head -n1)"
 RELEASE="$DEFAULT_RELEASE"
 BINARY=""
 

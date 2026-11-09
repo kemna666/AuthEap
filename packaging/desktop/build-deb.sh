@@ -6,7 +6,7 @@
 # 用法:
 #   ./build-deb.sh                         # 默认 raw 后端
 #   ./build-deb.sh --features backend-pcap
-#   VERSION=0.1.16 ./build-deb.sh
+#   VERSION=0.1.42 ./build-deb.sh
 #
 # 产物: packaging/desktop/out/autheap_<version>-<release>_<arch>.deb
 set -eu
@@ -15,19 +15,32 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 PKGDIR="$REPO/packaging/desktop"
 OUT="$PKGDIR/out"
 
-VERSION="${VERSION:-0.1.16}"
-RELEASE="${RELEASE:-1}"
-NAME="autheap"
-ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
-
 command -v dpkg-deb >/dev/null 2>&1 || {
 	echo "[!] 未找到 dpkg-deb，请使用 Debian/Ubuntu 系发行版" >&2
 	exit 1
 }
 
-# 0) 确保 CLI 已编译到 out/autheap
-if [ ! -x "$OUT/$NAME" ]; then
-	echo "[*] 未找到 $OUT/$NAME，先调用 build-desktop.sh ..."
+# 每次直接执行 build-deb 视为一次构建：自动 patch+1；CI 会传 VERSION 跳过。
+VERSION="${VERSION:-}"
+if [ -z "$VERSION" ] \
+   && [ "${AUTHEAP_VERSION_BUMPED:-0}" != 1 ] \
+   && [ "${AUTHEAP_NO_VERSION_BUMP:-0}" != 1 ]; then
+	VERSION="$("$REPO/scripts/auto-version.sh")"
+	export VERSION
+	export AUTHEAP_VERSION_BUMPED=1
+	echo "[*] 自动版本号: $VERSION"
+fi
+VERSION="${VERSION:-$(sed -n 's/^version[ 	]*=[ 	]*"\(.*\)".*/\1/p' "$REPO/Cargo.toml" | head -n1)}"
+export VERSION
+export AUTHEAP_BUILD_VERSION="$VERSION"
+RELEASE="${RELEASE:-1}"
+NAME="autheap"
+ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+
+# 0) 确保 CLI 已编译到 out/autheap，且版本与本次 deb 一致
+if [ ! -x "$OUT/$NAME" ] \
+   || ! "$OUT/$NAME" --version 2>/dev/null | grep -Fqx "autheap $VERSION"; then
+	echo "[*] 未找到匹配版本 $VERSION 的 $OUT/$NAME，先调用 build-desktop.sh ..."
 	"$PKGDIR/build-desktop.sh" "$@"
 fi
 BIN="$OUT/$NAME"

@@ -20,7 +20,7 @@
 #   API_BASE / GITHUB_SERVER_URL / CI_FORGE_URL   实例地址，默认 https://codeberg.org
 #   REPO_SLUG / GITHUB_REPOSITORY / CI_REPO       owner/repo
 #   TOKEN / RELEASE_TOKEN / GITHUB_TOKEN          私有仓库访问令牌（可选）
-#   GITHUB_ACTIONS=true                           在 GitHub Actions 中时用 GitHub API
+#   GITHUB_ACTIONS=true / GITHUB_SERVER_URL        GitHub.com 用 GitHub API；Codeberg/Forgejo 用实例 API
 set -eu
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,6 +32,12 @@ LEVEL="${1:-${BUMP_LEVEL:-patch}}"
 TAG="${CI_COMMIT_TAG:-}"
 if [ -z "$TAG" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
 	TAG="${GITHUB_REF_NAME:-}"
+fi
+# 兼容只设置 GITHUB_REF=refs/tags/xxx 的 Forgejo/Gitea Actions 版本
+if [ -z "$TAG" ]; then
+	case "${GITHUB_REF:-}" in
+		refs/tags/*) TAG="${GITHUB_REF#refs/tags/}" ;;
+	esac
 fi
 if [ -n "$TAG" ]; then
 	printf '%s\n' "${TAG#v}"
@@ -49,6 +55,11 @@ is_release_event() {
 }
 # Cargo.toml 里的当前版本：既是“版本线”基准（同主版本号），也是无远端记录时的起点
 cur="$(sed -n 's/^version[ 	]*=[ 	]*"\(.*\)".*/\1/p' Cargo.toml | head -n1)"
+# CI 只构建、不发布时，即使 workflow_dispatch 也不要递增版本号。
+if [ "${CI_VERSION_NO_BUMP:-0}" = "1" ] && [ -n "$cur" ]; then
+	printf '%s\n' "$cur"
+	exit 0
+fi
 if ! is_release_event; then
 	if [ -n "$cur" ]; then
 		printf '%s\n' "$cur"
@@ -70,9 +81,27 @@ json_versions() {
 		| grep -E '^[0-9]+(\.[0-9]+)*$' || true
 }
 
+# 仅 GitHub.com 的 Actions 用 GitHub API；Forgejo/Gitea（含 Codeberg）虽然也设置
+# GITHUB_ACTIONS=true 以保持兼容，但必须走实例自己的 /api/v1。
+is_github_actions() {
+	[ "${GITHUB_ACTIONS:-}" = "true" ] || return 1
+	[ -n "${FORGEJO_ACTIONS:-}${GITEA_ACTIONS:-}" ] && return 1
+	case "${GITHUB_SERVER_URL:-}" in
+		"")
+			# Forgejo/Gitea Actions 通常也会给 GITHUB_SERVER_URL；只有确实没有
+			# 且 CI_FORGE_URL 存在时才按 Forgejo 处理。
+			[ -n "${CI_FORGE_URL:-}" ] && return 1
+			return 0
+			;;
+		https://github.com|https://github.com/) return 0 ;;
+		*github.com) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 remote_versions() {
 	[ -n "$SLUG" ] || return 1
-	if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+	if is_github_actions; then
 		# GitHub API（tag / release 二选一，取到即用）
 		if [ -n "$TOKEN_V" ]; then
 			curl -fsS -m 20 -H "Authorization: Bearer $TOKEN_V" \

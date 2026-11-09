@@ -1,12 +1,12 @@
 #!/bin/sh
 # 生成 luci-app-autheap-client 的 .ipk 与 .apk（架构 all）。
 #
-# 用法: build-luci.sh [VERSION] [RELEASE]  （默认 0.1.16 / 1）
+# 用法: build-luci.sh [VERSION] [RELEASE]  （默认 0.1.42 / 1）
 # 输出: staging/luci-app-autheap-client_*.ipk 与 luci-app-autheap-client-*.apk
 set -eu
 . "$(dirname "$0")/common.sh"
 
-VERSION="${1:-0.1.16}"
+VERSION="${1:-$(sed -n 's/^version[ \t]*=[ \t]*"\(.*\)".*/\1/p' "$REPO/Cargo.toml" | head -n1)}"
 RELEASE="${2:-1}"
 LUCI_ROOT="$PKG_DIR/luci-app-autheap-client/root"
 NAME="luci-app-autheap-client"

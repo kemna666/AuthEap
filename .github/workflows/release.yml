@@ -15,6 +15,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # CI 的版本由 version job / ci-version.sh 统一决定，构建脚本不要再自动 +1。
+  AUTHEAP_NO_VERSION_BUMP: "1"
 
 jobs:
   # ---------- 计算版本号（tag 事件用 tag；手动触发则对最大版本 +1）----------
@@ -43,17 +45,37 @@ jobs:
     needs: [ version ]
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         include:
           - triple: x86_64-unknown-linux-musl
             ipk_arch: x86_64
             apk_arch: x86_64
+            cross_deps: ''
           - triple: aarch64-unknown-linux-musl
             ipk_arch: aarch64_cortex-a53
             apk_arch: aarch64_cortex-a53
+            cross_deps: gcc-aarch64-linux-gnu
+          - triple: armv7-unknown-linux-musleabihf
+            ipk_arch: arm_cortex-a7_neon-vfpv4
+            apk_arch: arm_cortex-a7_neon-vfpv4
+            cross_deps: gcc-arm-linux-gnueabihf
+          - triple: arm-unknown-linux-musleabihf
+            ipk_arch: arm_arm1176jzf-s_vfp
+            apk_arch: arm_arm1176jzf-s_vfp
+            cross_deps: gcc-arm-linux-gnueabihf
+          - triple: riscv64gc-unknown-linux-musl
+            ipk_arch: riscv64_riscv64
+            apk_arch: riscv64_riscv64
+            cross_deps: gcc-riscv64-linux-gnu
           - triple: mipsel-unknown-linux-musl
             ipk_arch: mipsel_24kc
             apk_arch: mipsel_24kc
+            cross_deps: ''
+          - triple: mips-unknown-linux-musl
+            ipk_arch: mips_24kc
+            apk_arch: mips_24kc
+            cross_deps: ''
     steps:
       - uses: actions/checkout@v4
 
@@ -66,11 +88,14 @@ jobs:
         with:
           key: cross-${{ matrix.triple }}
 
-      - name: 安装 aarch64 交叉链接器
-        if: matrix.triple == 'aarch64-unknown-linux-musl'
+      - name: 安装交叉链接器
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          sudo apt-get install -y --no-install-recommends file curl
+          DEPS="${{ matrix.cross_deps }}"
+          if [ -n "$DEPS" ]; then
+            sudo apt-get install -y --no-install-recommends $DEPS
+          fi
 
       - name: 交叉编译 + 打包 .ipk / .apk
         env:

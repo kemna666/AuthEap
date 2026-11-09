@@ -38,14 +38,20 @@ packaging/openwrt/
 └── staging/                  # 运行脚本时生成的中间/产物目录（自动创建）
 ```
 
-> **CI/CD**：`.github/workflows/ci.yml`（GitHub Actions）与 `.forgejo/workflows/*.yml`
-> （自建 Forgejo runner）都会交叉编译三种 musl 目标并打 `.ipk`/`.apk`/`.deb`，
-> 在 tag 或手动触发时自动**递增版本号**并创建 Release（共用 `scripts/` 下的脚本）。
-> 本地等价命令见下文。
+> **CI/CD**：
+> - Codeberg 推荐使用 `.woodpecker.yml`（Woodpecker，push/PR 测试，tag/manual 发布）；
+> - `.forgejo/workflows/*.yml` 用于自建 Forgejo runner 或 Codeberg 托管 Actions alpha；
+> - `.github/workflows/*.yml` 用于 GitHub。
+> 三套流水线共用 `scripts/` 下的版本、打包、发布脚本；矩阵覆盖
+> x86_64 / aarch64 / armv7 / armv6 / riscv64 / mipsel_24kc / mips_24kc，
+> 每个架构产出 ipk + apk，另加 LuCI 包与桌面 deb，并统一上传 Release。
+> 完整启用步骤见 [`docs/codeberg-ci.md`](../../docs/codeberg-ci.md)。本地等价命令见下文。
 
-> **版本号规则**：`0.1.x`，**每发布一次 release 把 `x` 加一**（`0.1.1` → `0.1.2` → `0.1.3`…）；
-> 包名的 `-1`（apk 的 `-r1`）是包管理系统自己的 revision，**发行新版本时保持 `1`**，
-> 发版本只动 `x`。递增命令：`./scripts/bump-version.sh`（`--commit --tag --push` 可直接发布）。
+> **版本号规则**：`0.1.x`，**每编译/构建一次自动把 `x` 加一**（`0.1.42` → `0.1.43` → …）；
+> `cross-build.sh`、`build-desktop.sh`、`build-deb.sh`、`scripts/ci-build-package.sh`
+> 和 `scripts/build.sh` 都会先递增再编译，并同步 `Cargo.toml` / `Cargo.lock` 与本目录
+> 各默认值。包名的 `-1`（apk 的 `-r1`）是包管理系统自己的 revision，**发行新版本时保持 `1`**。
+> CI 由 `ci-version.sh` 统一计算一次，设置 `AUTHEAP_NO_VERSION_BUMP=1` 禁止各架构 job 重复递增。
 
 ## 快速开始（不依赖完整 OpenWrt SDK）
 
@@ -68,20 +74,20 @@ MIPSEL_SF_GCC=$PWD/musl-cross/bin/mipsel-sf-gcc \
 
 # 3) 打 apk（24.10）
 ./packaging/openwrt/scripts/build-apk.sh \
-    --arch aarch64 --version 0.1.2 --binary staging/autheap
-#   产物：staging/AuthEAP-Client-0.1.2-r1.apk
+    --arch mipsel_24kc --version 0.1.2 --binary staging/autheap
+#   产物：staging/AuthEAP-Client-0.1.2-r1_mipsel_24kc.apk（文件名带架构）
 ```
 
-> `--arch` 给 apk 用 `aarch64` / `x86_64` 这类；给 ipk 用 OpenWrt 架构名如
-> `aarch64_cortex-a53` / `mipsel_24kc`。安装时请与固件架构一致。
+> `--arch` 请与固件架构一致：mipsel_24kc（MT7621）、aarch64_cortex-a53、
+> x86_64 等。apk 包文件名会带架构，避免多目标构建时互相覆盖。
 
 ### 设备端安装
 
 ```bash
 # opkg / 老固件
-opkg install AuthEAP-Client_0.1.3-1_<arch>.ipk
+opkg install AuthEAP-Client_0.1.42-1_<arch>.ipk
 # apk / OpenWrt 24.10（自签名/未签名包需放开校验）
-apk add --allow-untrusted AuthEAP-Client-0.1.3-r1.apk
+apk add --allow-untrusted AuthEAP-Client-0.1.42-r1_mipsel_24kc.apk
 # LuCI 界面包同理：luci-app-autheap-client_*.ipk / luci-app-autheap-client-*.apk
 ```
 
@@ -105,31 +111,46 @@ autheap --nettest                    # 留空：只检查本机与默认网关
 
 `luci-app-autheap-client` 依赖主程序包，安装后：
 
-1. 网页 **网络 → AuthEAP-Client**，配置页按**每个插件/功能各自一个 Tab** 组织：
-   - **基本设置**：开关机自启/后台模式、认证网卡、账号密码、后端、重试与超时等；
-   - **插件**：启用哪些插件（逐行添加/删除，选项由 `autheap --list-plugins` 动态生成），
-     以及 printer 的“打印收到的帧”；
-   - **rjv3 锐捷**：锐捷 v3/v4 插件参数（心跳间隔、EAPOL 广播地址、DHCP 方式/脚本、
+1. 网页 **网络 → AuthEAP-Client**，配置页使用 LuCI 原生表单与 Tab（`form.NamedSection`
+   + `s.tab()`），按**每个插件/功能各自一个 Tab** 组织：
+   - **基本设置**：开机自启、开机延迟认证（默认 600 秒）、后台模式、认证网卡、
+     账号密码、后端、重试与超时；
+   - **插件**：原生多选下拉，选项和说明由 `autheap --list-plugins` 动态生成；
+     也可输入列表外的自定义插件名（需已编译进客户端），并显示 printer 的“打印收到的帧”；
+   - **锐捷**：锐捷 v3/v4 插件参数（心跳间隔、EAPOL 广播地址、DHCP 方式/脚本、
      服务名、版本串、伪造 DNS/序列号、二次认证等待次数）；
-   - **beacon 保活**：目标 IP/端口/间隔/载荷（周期性发送自定义 TCP 数据包）；
+   - **Beacon**：目标 IP/端口/间隔/载荷（周期性发送自定义 TCP 数据包）；
    - **日志**：日志文件、大小上限、保留份数、自动清理间隔；
-   - 页面下方固定显示**后端读取的配置文件**（可刷新/重新生成）。
-2. **开机自启**：配置页的“开机自启”开关（或状态页的按钮）会调用
-   `/etc/init.d/autheap-client enable|disable`（生成/移除 `/etc/rc.d` 软链）——
-   勾选后随系统启动；未勾选时仍可在状态页随时手动启动/停止/重启；
-3. **认证网卡**：接口栏为带系统网卡下拉的输入框（可下拉选择也可手动输入），
-   数据来自 `/proc/net/dev`；
-4. **其他插件**：除内置的 `rjv3 / printer / stats / report / beacon` 外，可在
+   - **高级**：掉线重连、失败等待、单实例锁文件；
+   - 页面下方**后端配置**区显示 `gen-config` 实际生成的
+     `/etc/autheap-client.conf`，可直接刷新/重新生成；若它比 UCI 旧，页面顶部会提示。
+2. **设置同步**：点“保存并应用”后，LuCI 完成 UCI commit，随即：
+   - 调用 `gen_config` 把最新 UCI 重新渲染成 `/etc/autheap-client.conf`；
+   - 同步 `/etc/rc.d` 开机自启软链（同时回写 UCI `enabled`）；
+   - 若服务正在运行则自动 `restart`，否则保持停止（不会因为关闭自启而杀进程）。
+   “保存”只写 UCI，不应用、不重启，符合 LuCI 的标准语义。
+3. **开机自启与延迟认证**：配置页/状态页的开关会调用
+   `/etc/init.d/autheap-client enable|disable`（生成/移除 `/etc/rc.d` 软链），
+   init 脚本会把结果同步写回 UCI `enabled`；反过来手工执行 init 的
+   enable/disable，配置页和状态页也会显示真实状态。
+   开机自启时的认证延迟由 `boot_delay` 控制（默认 600 秒）：
+   - 只有开机 `boot` 动作会设置 `AUTHEAP_BOOT_START=1`，后端按 `boot_delay` 等待；
+   - 手动执行 `/etc/init.d/autheap-client start` 或 LuCI 点“启动”不带该标记，
+     会**立即认证**；运行中点击“启动”会重启服务以立即认证。
+4. **认证网卡**：接口栏使用 LuCI 原生 `DeviceSelect`（带网卡图标/状态，可下拉选择
+   也可手动输入）；
+5. **其他插件**：除内置的 `rjv3 / printer / stats / report / beacon` 外，可在
    “插件”Tab 里逐行追加你自己写的插件名（需已编译进客户端），会以
    `--plugin <name>` 传给进程；
-5. **状态页**只显示运行状态、开机自启、接口/账号、插件、beacon 目标与版本
-   （**已移除日志相关内容**，日志统一在「日志」页），并带一个 **网络测试** 区域：
-   填入目标 `IP / 主机[:端口]` 后点“开始测试”（留空则只测本机与默认网关），
-   后端执行 `autheap --nettest <目标> --interface <认证网卡>`，页面直接展示报告 ——
-   本机接口/网卡地址/网关/DNS、目标的域名解析、TCP 连接（默认端口 80）与
-   ICMP 连通性，标 ✘ 的行表示该项有问题；
-6. **日志页**可实时刷新（增量拉取）并查看历史 `.1/.2…`，支持自动刷新/加载完整历史/
-   清空日志。菜单里的 状态/配置/日志 在多数主题下就是页面顶部的三个 Tab。
+6. **状态页**使用 LuCI 原生状态区块与标签显示运行状态、开机自启、接口/账号、插件、
+   Beacon 目标与版本（**已移除日志相关内容**，日志统一在「日志」页），并带一个
+   **网络测试** 区域：填入目标 `IP / 主机[:端口]` 后点“开始测试”（留空则只测本机与
+   默认网关），后端执行 `autheap --nettest <目标> --interface <认证网卡>`，页面直接
+   展示报告 —— 本机接口/网卡地址/网关/DNS、目标的域名解析、TCP 连接（默认端口 80）
+   与 ICMP 连通性，标 ✘ 的行表示该项有问题；
+7. **日志页**使用原生按钮与主题配色，可实时刷新（增量拉取）并查看历史 `.1/.2…`，
+   支持自动刷新/加载完整历史/清空日志。菜单里的 状态/配置/日志 在多数主题下就是
+   页面顶部的三个 Tab。
 
 ## 用 OpenWrt SDK / feeds 构建（可选）
 
@@ -143,15 +164,19 @@ autheap --nettest                    # 留空：只检查本机与默认网关
 
 ```
 config autheap-client 'main'
-	option enabled '0'           # 开机自启（由 LuCI/init enable|disable 同步；0=不自启）
+	option enabled '0'           # 开机自启（以 /etc/rc.d 软链为准，init/LuCI 会同步）
+	option boot_delay '600'       # 开机自启后等待 N 秒再认证；0=立即
+	option daemon '0'            # 后台守护模式（一般交给 procd）
 	option ifname 'eth0'         # 认证网卡
 	option username ''
 	option password ''
 	option backend 'raw'
-	option plugin_rjv3 '1'
+	list plugins 'rjv3'          # 新式插件列表；存在即以其为准（空 = 不启用）
+	option plugin_rjv3 '1'       # 旧布尔位，仅为兼容旧配置保留
 	option plugin_printer '0'
 	option plugin_stats '0'
-	option extra_plugins ''      # 其他插件名（空格/逗号分隔，需已编译进客户端）
+	option printer_log_recv '0'  # printer 插件：是否打印收到的帧
+	option extra_plugins ''      # 旧式额外插件名（空格/逗号分隔）
 	option beacon_dst ''          # beacon 插件：目标 IP（填了就自动启用 beacon）
 	option beacon_port '8083'     # beacon 插件：目标端口
 	option beacon_interval '60'   # beacon 插件：发送间隔（秒；0 = 禁用）
@@ -169,10 +194,13 @@ config autheap-client 'main'
 	option max_retries '3'
 	option max_failures '3'
 	option stage_timeout '5'
+	option restart_on_logoff '1'  # 掉线后自动重连
+	option wait_after_fail '30'   # 失败后等待重试秒数
 	option log_file '/var/log/autheap-client.log'   # 日志文件（后端自己写入）
 	option log_max_kb '256'       # 单文件上限，超过自动轮转清理
 	option log_keep '3'           # 保留历史份数（.1/.2/…）
 	option log_rotate_secs '300'  # 检查/自动清理间隔（秒）
+	option pid_file '/var/run/autheap.pid'  # 单实例锁；- 表示不限制
 ```
 
 ## 配置文件（后端据此认证）
@@ -184,8 +212,9 @@ config autheap-client 'main'
 /usr/bin/autheap --config /etc/autheap-client.conf
 ```
 
-启动——即“LuCI 的配置做成配置文件，后端调用配置文件认证”。LuCI 保存配置时（rpcd
-`set_config`）也会立刻重刷该文件；配置页底部可直接查看/重新生成它。
+启动——即“LuCI 的配置做成配置文件，后端调用配置文件认证”。LuCI 点“保存并应用”
+之后会立刻重新生成该文件（rpcd `gen_config` 或 init 启动时都会刷新），配置页下方
+可直接查看/重新生成它；如果它比 `/etc/config/autheap-client` 旧，页面上会给出提示。
 也可以手动运行：`autheap --config /etc/autheap-client.conf`（命令行参数优先于文件）。
 
 ## 日志：实时刷新 + 自动清理
@@ -220,6 +249,12 @@ config autheap-client 'main'
   `/etc/init.d/rpcd restart`，然后**退出并重新登录 LuCI**（ACL 随会话缓存），最后
   `Ctrl+F5` 强刷页面。新版「日志」页在 `log_files` 不可用时会自动改用 `status`
   里的文件列表，因此即使 ACL 未刷新也能正常看日志；
+- **保存后状态页/配置页看起来没同步** → 正常情况下点“保存并应用”会自动
+  `gen_config` 并按需重启；如果配置页顶部提示“后端配置文件比 UCI 旧”，点旁边的
+  “重新生成并应用”即可（服务在运行时会自动重启）。
+- **开机自启与 `uci get autheap-client.main.enabled` 不一致** → 以
+  `/etc/rc.d/S??autheap-client` 为准；执行一次 `/etc/init.d/autheap-client enable`
+  或 `disable` 会同时修复 UCI 指示位，LuCI 配置页/状态页也会显示真实状态。
 - **状态页「网络测试」提示 `✘`** → 先看报告里哪一项失败：
   `DNS 解析` 失败说明设备自身 DNS 不通（检查接口/DNS）；
   `TCP 连接` 失败说明目标端口未监听或被防火墙拦（默认端口 80，可用 `目标:端口` 指定）；

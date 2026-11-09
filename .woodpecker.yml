@@ -1,34 +1,24 @@
-# Woodpecker CI —— 用于 **Codeberg**（ci.codeberg.org）
+# Woodpecker CI —— Codeberg 官方托管 CI（ci.codeberg.org）
 #
-# 为什么要用这个文件：
-#   Codeberg 不托管 Forgejo Actions（所以仓库里的 `.forgejo/workflows/*` 在 Codeberg
-#   上永远不会被执行），Codeberg 官方提供的是 **Woodpecker CI**。把这个文件放在仓库根
-#   目录并在 Woodpecker 里激活仓库，CI/CD 就能跑起来。
-#
-# 启用步骤：
-#   1. 提交本文件到 main（git push）；
-#   2. 打开 https://ci.codeberg.org → 用 Codeberg 账号登录 → 找到本仓库 → Activate；
-#   3. （可选，只有“自动创建 Release”需要）仓库设置 → Secrets → 新增：
-#        名称: release_token   值: <Codeberg 访问令牌，权限需含 write:repository>
-#      令牌在 Codeberg → Settings → Applications → Generate new token 里创建。
+# 这是本项目在 Codeberg 上的**推荐/主用**流水线；Codeberg 官方文档也建议需要
+# 托管 CI 的仓库优先使用 Woodpecker。启用步骤：
+#   1. 向 Codeberg 申请 Woodpecker CI 访问权限（Codeberg-e.V./requests 里的
+#      Woodpecker CI 表单）；
+#   2. 登录 https://ci.codeberg.org → 添加/激活本仓库；
+#   3. 只有“自动创建 Release”需要：仓库 Secrets 新增
+#        release_token = <Codeberg 访问令牌，权限含 write:repository>
+#      （Codeberg → Settings → Applications → Generate new token）。
 #
 # 行为：
-#   - push / PR：构建 + 单测 + 脚本静态检查 + 交叉编译 OpenWrt 包（只构建，不发布）；
-#   - 推送 tag（例如 0.1.17）或手动触发（Manual Pipeline）：
-#     版本号由 `scripts/ci-version.sh` 决定（tag 用 tag 名；手动触发取同版本线远端最大 +1），
-#     打包完成后调用 `scripts/publish-release.sh` 创建/更新 Release 并上传全部产物。
+#   - push / pull_request：只跑构建、单元测试、静态检查（省资源）；
+#   - push tag / 手动 Pipeline：再交叉编译 7 类 ABI 架构、打 .ipk/.apk、LuCI
+#     包、桌面 .deb，最后调用 scripts/publish-release.sh 创建/更新 Codeberg Release。
 #
-# 相关脚本（与 .github/.forgejo 流水线共用同一套）：
-#   scripts/ci-version.sh         计算版本号
-#   scripts/ci-checks.sh          shell/JSON/JS 静态检查
-#   scripts/ci-build-package.sh   交叉编译 + 打 ipk/apk（可选发布）
-#   scripts/publish-release.sh    上传 Release 附件（幂等）
-#   scripts/bump-version.sh       版本号递增
-
+# 如果同时启用了 `.forgejo/workflows`（Forgejo Actions），请只保留一套，避免重复
+# 构建和并发发布。
 when:
   - event: [ push, pull_request, tag, manual ]
 
-# 拉取 tag（便于 ci-version.sh 在没有 API 权限时用本地 tag 兜底）
 clone:
   git:
     image: woodpeckerci/plugin-git
@@ -41,16 +31,19 @@ steps:
     image: rust:1-bookworm
     commands:
       - apt-get update
-      - apt-get install -y --no-install-recommends git ca-certificates curl python3
+      - apt-get install -y --no-install-recommends git ca-certificates curl python3 nodejs python3-yaml
       - cargo build --release --locked
       - cargo test --locked
       - ./scripts/ci-checks.sh
 
-  # ---------- 2) 计算版本号（写入 .ci-version，后续步骤共用）----------
+  # ---------- 2) 版本号（仅发布事件）----------
   - name: version
     image: rust:1-bookworm
     depends_on: [ build-test ]
+    when:
+      - event: [ tag, manual ]
     environment:
+      AUTHEAP_NO_VERSION_BUMP: "1"
       RELEASE_TOKEN:
         from_secret: release_token
     commands:
@@ -59,59 +52,78 @@ steps:
       - ./scripts/ci-version.sh > .ci-version
       - echo "本次版本号：$(cat .ci-version)"
 
-  # ---------- 3) 三种 musl 目标：交叉编译 + 打 .ipk/.apk ----------
-  # 串行执行（同一 workspace 里依次产出，避免并发抢 Release；小项目足够快）
+  # ---------- 3) 7 类 ABI 架构：交叉编译 + 打 .ipk/.apk（仅发布事件）----------
+  # 同一 workspace 串行执行，产物保留给后面的 LuCI/Release 步骤。
   - name: openwrt-packages
     image: rust:1-bookworm
     depends_on: [ version ]
+    when:
+      - event: [ tag, manual ]
     environment:
-      CI_SKIP_PUBLISH: "1"          # 发布统一放到最后一步，避免并发创建 Release
+      CI_SKIP_PUBLISH: "1"
+      AUTHEAP_NO_VERSION_BUMP: "1"
     commands:
       - apt-get update
-      - apt-get install -y --no-install-recommends git ca-certificates curl file gcc-aarch64-linux-gnu
+      - apt-get install -y --no-install-recommends git ca-certificates curl file \
+          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf gcc-riscv64-linux-gnu
       - rustup component add rust-src
       - |
-        set -e
+        set -eu
+        # 每个 ABI 代表性 OpenWrt 架构；更多同 ABI 的架构可复制对应条目：
+        #   aarch64: aarch64_cortex-a53 / aarch64_cortex-a72 / aarch64_generic
+        #   armv7:   arm_cortex-a7_neon-vfpv4 / arm_cortex-a9_vfpv3-d16
+        #   mipsel:  mipsel_24kc / mipsel_74kc
         for target in \
           "x86_64-unknown-linux-musl x86_64 x86_64" \
           "aarch64-unknown-linux-musl aarch64_cortex-a53 aarch64_cortex-a53" \
-          "mipsel-unknown-linux-musl mipsel_24kc mipsel_24kc"; do
+          "armv7-unknown-linux-musleabihf arm_cortex-a7_neon-vfpv4 arm_cortex-a7_neon-vfpv4" \
+          "arm-unknown-linux-musleabihf arm_arm1176jzf-s_vfp arm_arm1176jzf-s_vfp" \
+          "riscv64gc-unknown-linux-musl riscv64_riscv64 riscv64_riscv64" \
+          "mipsel-unknown-linux-musl mipsel_24kc mipsel_24kc" \
+          "mips-unknown-linux-musl mips_24kc mips_24kc"; do
           set -- $target
           echo "=== 交叉编译与打包: $1（ipk=$2 apk=$3）"
           ./scripts/ci-build-package.sh "$1" "$2" "$3"
         done
       - ls -l packaging/openwrt/staging/
 
-  # ---------- 4) LuCI 界面包 + 桌面 .deb，并在发布事件下上传 Release ----------
+  # ---------- 4) LuCI 包 + 桌面 deb + 发布（仅发布事件）----------
   - name: luci-desktop-and-release
     image: rust:1-bookworm
     depends_on: [ openwrt-packages ]
+    when:
+      - event: [ tag, manual ]
     environment:
+      AUTHEAP_NO_VERSION_BUMP: "1"
       RELEASE_TOKEN:
         from_secret: release_token
     commands:
       - apt-get update
-      - apt-get install -y --no-install-recommends git ca-certificates curl dpkg-dev python3
-      - V="$(cat .ci-version)"
-      - ./packaging/openwrt/scripts/build-luci.sh "$V" 1
-      - VERSION="$V" ./packaging/desktop/build-deb.sh
-      - ls -l packaging/openwrt/staging/ packaging/desktop/out/
+      - apt-get install -y --no-install-recommends git ca-certificates curl dpkg-dev
       - |
-        set -e
+        set -eu
+        V="$(cat .ci-version)"
+        ./packaging/openwrt/scripts/build-luci.sh "$V" 1
+        VERSION="$V" ./packaging/desktop/build-deb.sh
+        ls -l packaging/openwrt/staging/ packaging/desktop/out/
+      - |
+        set -eu
         V="$(cat .ci-version)"
         case "${CI_PIPELINE_EVENT:-}" in
-          tag|release|manual)
-            if [ -n "${RELEASE_TOKEN:-}" ]; then
-              echo "=== 发布 Release $V"
-              ./scripts/publish-release.sh "$V" "$V" \
-                packaging/openwrt/staging/*.ipk \
-                packaging/openwrt/staging/*.apk \
-                packaging/desktop/out/*.deb
-            else
-              echo "[!] 未配置 secret release_token：跳过发布（artifacts 仍在 agent 上）"
-            fi
-            ;;
+          tag|release|manual) ;;
           *)
-            echo "[*] 事件 ${CI_PIPELINE_EVENT:-unknown}：仅构建，不发布"
+            [ -n "${CI_COMMIT_TAG:-}" ] || {
+              echo "[*] 事件 ${CI_PIPELINE_EVENT:-unknown}：不发布"
+              exit 0
+            }
             ;;
         esac
+        [ -n "${RELEASE_TOKEN:-}" ] || {
+          echo "[!] 未配置 secret release_token，无法发布 Release" >&2
+          exit 1
+        }
+        echo "=== 发布 Release $V"
+        ./scripts/publish-release.sh "$V" "$V" \
+          packaging/openwrt/staging/*.ipk \
+          packaging/openwrt/staging/*.apk \
+          packaging/desktop/out/*.deb

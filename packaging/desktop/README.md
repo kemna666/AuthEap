@@ -80,8 +80,10 @@ sudo rm /etc/apt/sources.list.d/autheap.list && sudo apt update   # 移除源
 
 ```bash
 # 1) 编译（默认 raw 后端，仅 Linux）
+#    每次执行会自动把 patch 版本 +1（0.1.42 → 0.1.43），并同步 Cargo.toml/Cargo.lock
 ./packaging/desktop/build-desktop.sh
 #    需要 libpcap 时： ./packaging/desktop/build-desktop.sh --features backend-pcap
+#    想固定版本/跳过递增： VERSION=0.1.42 ./packaging/desktop/build-desktop.sh
 
 # 2) 直接试运行（raw 后端需 root）
 sudo ./packaging/desktop/out/autheap -i eth0 -u 学号 -p 密码 --plugin rjv3

@@ -126,6 +126,19 @@ fn real_main() -> Result<u8, Box<dyn std::error::Error>> {
     }
 
     autheap::log_info!("AuthEAP {VERSION} 已启动");
+
+    // 只有 init.d 的 boot() 会把 AUTHEAP_BOOT_START=1 传进来；
+    // 手动 start / LuCI 点“启动”不设置，因此立即认证。
+    if matches!(
+        std::env::var("AUTHEAP_BOOT_START").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    ) {
+        app.wait_boot_delay();
+    }
+
+    if !app.shutdown.load(Ordering::Relaxed) {
+        autheap::log_info!("开始认证");
+    }
     app.run()?;
     Ok(0)
 }

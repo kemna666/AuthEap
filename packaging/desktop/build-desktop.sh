@@ -21,6 +21,17 @@ for arg in "$@"; do
 	esac
 done
 
+# 每次直接编译桌面版时自动递增版本号；build-deb.sh 会传入 VERSION 并跳过。
+if [ -z "${VERSION:-}" ] \
+   && [ "${AUTHEAP_VERSION_BUMPED:-0}" != 1 ] \
+   && [ "${AUTHEAP_NO_VERSION_BUMP:-0}" != 1 ]; then
+	VERSION="$("$REPO/scripts/auto-version.sh")"
+	export VERSION
+	export AUTHEAP_VERSION_BUMPED=1
+	echo "[*] 自动版本号: $VERSION"
+fi
+[ -n "${VERSION:-}" ] && export AUTHEAP_BUILD_VERSION="$VERSION"
+
 echo "[*] 编译桌面 Linux 版 CLI（autheap）${FEATURES:+（$FEATURES）}..."
 (cd "$REPO" && cargo build --release $FEATURES)
 

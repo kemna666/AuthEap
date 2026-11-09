@@ -3,17 +3,17 @@
 #
 # 用法:
 #   build-apk.sh --arch aarch64 \
-#                [--version 0.1.16] [--release 1] \
+#                [--version 0.1.42] [--release 1] \
 #                [--binary staging/autheap]
-# 输出: staging/AuthEAP-Client-<version>-r<release>.apk
+# 输出: staging/AuthEAP-Client-<version>-r<release>_<arch>.apk
 #
 # 设备端安装（未签名包）:
-#   apk add --allow-untrusted AuthEAP-Client-0.1.16-r1.apk
+#   apk add --allow-untrusted AuthEAP-Client-0.1.42-r1_<arch>.apk
 set -eu
 . "$(dirname "$0")/common.sh"
 
 ARCH=""
-VERSION="$DEFAULT_VERSION"
+VERSION="$(sed -n 's/^version[ \t]*=[ \t]*"\(.*\)".*/\1/p' "$REPO/Cargo.toml" | head -n1)"
 RELEASE="$DEFAULT_RELEASE"
 BINARY=""
 
@@ -34,7 +34,9 @@ mkdir -p "$STAGE"
 
 NAME="AuthEAP-Client"
 PKG="${NAME}-${VERSION}-r${RELEASE}"
-OUT="$STAGE/$PKG.apk"
+# apk 的包名不带架构，但 7 个架构的产物会放在同一个 staging 目录，文件名必须带架构，
+# 否则后构建的包会覆盖前面的包。
+OUT="$STAGE/${PKG}_${ARCH}.apk"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -51,6 +53,20 @@ chmod 0755 "$WORK/pkg/etc/init.d/autheap-client"
 chmod 0755 "$WORK/pkg/usr/libexec/autheap-client/gen-config"
 chmod 0600 "$WORK/pkg/etc/config/autheap-client"
 
+# OpenWrt apk 的 libc 依赖使用 so:libc.musl-<soname>.so.1。
+# 注意：软件包架构名与解释器 soname 并不总是一致（armv6/armv7 都是 armhf，
+# mipsel/mips 是软浮点 mipsel-sf/mips-sf），不能直接用 $ARCH。
+case "$ARCH" in
+  x86_64*)  LIBC_SONAME=x86_64 ;;
+  i386*|i486*|i586*|i686*) LIBC_SONAME=i386 ;;
+  aarch64*) LIBC_SONAME=aarch64 ;;
+  riscv64*) LIBC_SONAME=riscv64 ;;
+  arm*)     LIBC_SONAME=armhf ;;
+  mipsel*)  LIBC_SONAME=mipsel-sf ;;
+  mips*)    LIBC_SONAME=mips-sf ;;
+  *)        LIBC_SONAME="$ARCH" ;;
+esac
+
 # .PKGINFO（apk v2 格式；加 depend 可在此处追加多行）
 cat > "$WORK/pkg/.PKGINFO" <<EOF
 pkgname = $NAME
@@ -65,7 +81,7 @@ maintainer = $DEFAULT_MAINTAINER
 license = GPL-3.0
 replaces =
 provides =
-depend = so:libc.musl-$ARCH.so.1
+depend = so:libc.musl-$LIBC_SONAME.so.1
 EOF
 
 # tar.gz 打包（apk 即 gzip 的 tar，内部 .PKGINFO + 文件）

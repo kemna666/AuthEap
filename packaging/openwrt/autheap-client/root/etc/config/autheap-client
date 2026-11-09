@@ -1,12 +1,18 @@
 config autheap-client 'main'
 	option enabled '0'
+	option daemon '0'
+	option boot_delay '600'      # 开机自启后等待 N 秒再认证；0=立即
 	option ifname 'eth0'
 	option username ''
 	option password ''
 	option backend 'raw'
+	# ---- 插件：新式 list，存在即以其为准（空列表 = 不启用任何插件）----
+	# 旧布尔位保留仅为兼容旧配置；有 plugins 时不再回退到它们。
+	list plugins 'rjv3'
 	option plugin_rjv3 '1'
 	option plugin_printer '0'
 	option plugin_stats '0'
+	option printer_log_recv '0'
 	option extra_plugins ''          # 额外插件名（空格/逗号分隔，需已编译进客户端）
 	# ---- beacon 插件：周期性向指定 IP:端口 发送自定义 TCP 数据包 ----
 	# 只要 beacon_dst 非空且 beacon_interval != 0，启动时就会自动启用 beacon 插件
@@ -27,6 +33,8 @@ config autheap-client 'main'
 	option max_retries '3'
 	option max_failures '3'
 	option stage_timeout '5'
+	option restart_on_logoff '1'
+	option wait_after_fail '30'
 	# ---- 日志：后端写入该文件并按大小自动轮转清理（保留 log_keep 份历史）----
 	option log_file '/var/log/autheap-client.log'
 	option log_max_kb '256'

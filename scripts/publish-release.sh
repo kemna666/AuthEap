@@ -36,10 +36,9 @@ command -v curl >/dev/null 2>&1 || { echo "[!] 需要 curl" >&2; exit 1; }
 
 API="$SERVER/api/v1/repos/$SLUG"
 AUTH="Authorization: token $TOKEN_V"
-BODY="AuthEAP-Client ${VERSION} —— 由 CI 自动构建并发布。
-
-包含：OpenWrt .ipk/.apk（含 LuCI 界面包）与桌面 Linux .deb。
-版本号自动递增；本 Release 由 CI 在 tag/手动触发时创建。"
+# JSON 字符串里不能直接放换行；双引号里用 \\n 得到 JSON 的 \n 转义。
+BODY="AuthEAP-Client ${VERSION} —— 由 CI 自动构建并发布。\\n\\n包含：OpenWrt .ipk/.apk（含 LuCI 界面包）与桌面 Linux .deb。\\n版本号自动递增；本 Release 由 CI 在 tag/手动触发时创建。"
+SHA="${CI_COMMIT_SHA:-${GITHUB_SHA:-}}"
 
 # 从 JSON 里取第一个 "id": <num>
 json_id() {
@@ -47,6 +46,16 @@ json_id() {
 }
 
 echo "[*] 仓库: $SLUG  实例: $SERVER  tag: $TAG  版本: $VERSION"
+
+# 先确认至少有一个真实文件，避免“创建了 Release 但没有附件”。
+file_count=0
+for f in "$@"; do
+	[ -f "$f" ] && file_count=$((file_count + 1))
+done
+[ "$file_count" -gt 0 ] || {
+	echo "[!] 没有任何可上传的附件（检查 glob / 构建产物目录）" >&2
+	exit 1
+}
 
 if [ "$DRY_RUN" = "1" ]; then
 	echo "[dry-run] 将创建/复用 Release $TAG 并上传: $*"
@@ -59,9 +68,11 @@ rel_id="$(curl -sS -m 30 -H "$AUTH" "$API/releases/tags/$TAG" 2>/dev/null | json
 # ---------- 2) 不存在则创建（Forgejo 会同时建 tag） ----------
 if [ -z "$rel_id" ]; then
 	echo "[*] Release $TAG 不存在，正在创建 ..."
+	target_json=''
+	[ -n "$SHA" ] && target_json=",\"target_commitish\":\"$SHA\""
+	payload="{\"tag_name\":\"$TAG\",\"name\":\"$TAG\"$target_json,\"body\":\"$BODY\"}"
 	resp="$(curl -sS -m 30 -X POST -H "$AUTH" -H 'Content-Type: application/json' \
-		-d "{\"tag_name\":\"$TAG\",\"name\":\"$TAG\",\"body\":\"$BODY\"}" \
-		"$API/releases" 2>/dev/null || true)"
+		-d "$payload" "$API/releases" 2>/dev/null || true)"
 	rel_id="$(printf '%s' "$resp" | json_id)"
 	if [ -z "$rel_id" ]; then
 		# 可能被并发任务抢先创建，重试一次查询
@@ -79,20 +90,29 @@ echo "[*] Release id = $rel_id"
 # ---------- 3) 上传附件（同名跳过，幂等） ----------
 existing="$(curl -sS -m 30 -H "$AUTH" "$API/releases/$rel_id/assets" 2>/dev/null || true)"
 uploaded=0
+found=0
 for f in "$@"; do
 	[ -f "$f" ] || { echo "[!] 文件不存在，跳过: $f" >&2; continue; }
+	found=$((found + 1))
 	name="$(basename "$f")"
-	case "$existing" in
-		*"\"name\":\"$name\""*)
-			echo "[=] 已存在，跳过: $name"
-			continue
-			;;
-	esac
+	if printf '%s' "$existing" | grep -Fq "\"name\":\"$name\"" \
+	   || printf '%s' "$existing" | grep -Fq "\"name\": \"$name\""; then
+		echo "[=] 已存在，跳过: $name"
+		continue
+	fi
 	echo "[+] 上传: $name"
-	curl -sS -m 300 -X POST -H "$AUTH" \
+	if ! curl -fsS -m 300 -X POST -H "$AUTH" \
 		-F "attachment=@$f" \
-		"$API/releases/$rel_id/assets?name=$name" >/dev/null
+		"$API/releases/$rel_id/assets?name=$name" >/dev/null; then
+		echo "[!] 上传失败: $name" >&2
+		exit 1
+	fi
 	uploaded=$((uploaded + 1))
 done
+
+[ "$found" -gt 0 ] || {
+	echo "[!] 没有任何可上传的附件（检查 glob / 构建产物目录）" >&2
+	exit 1
+}
 
 echo "[*] 完成：新上传 $uploaded 个附件 → $SERVER/$SLUG/releases/tag/$TAG"

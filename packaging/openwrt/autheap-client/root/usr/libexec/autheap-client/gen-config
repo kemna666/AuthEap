@@ -86,6 +86,8 @@ tmp="$OUT.tmp.$$"
 	echo "printer_log_recv = $(is_on printer_log_recv 0)"
 	echo
 	echo "# ---- 流程 ----"
+	echo "daemon = $(is_on daemon 0)"
+	echo "boot_delay = $(getd boot_delay 600)"
 	echo "heartbeat = $(getd heartbeat 20)"
 	echo "eap_bcast_addr = $(getd eap_bcast_addr 0)"
 	echo "dhcp_type = $(getd dhcp_type 2)"
@@ -114,8 +116,14 @@ tmp="$OUT.tmp.$$"
 	echo "beacon_interval = $beacon_interval"
 	echo "beacon_payload = $(getd beacon_payload '')"
 	echo
-	echo "# ---- 单实例锁（认证进程只允许一个；留空 = 不限制）----"
-	echo "pid_file = $(getd pid_file /var/run/autheap.pid)"
+	echo "# ---- 单实例锁（认证进程只允许一个；- 或留空 = 不限制）----"
+	# pid_file 需要区分“未设置”（用默认值）与“显式留空”（不限制单实例），
+	# 因此不能直接用 getd（它会把空值也替换成默认值）。
+	if uci -q get "$CONF.main.pid_file" >/dev/null 2>&1; then
+		echo "pid_file = $(getv pid_file)"
+	else
+		echo "pid_file = /var/run/autheap.pid"
+	fi
 } > "$tmp" || { rm -f "$tmp"; exit 1; }
 
 chmod 0600 "$tmp" 2>/dev/null || true

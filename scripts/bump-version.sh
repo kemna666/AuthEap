@@ -1,5 +1,5 @@
 #!/bin/sh
-# 版本号自增 / 设置工具（Cargo.toml 与 Cargo.lock 同步修改）。
+# 版本号自增 / 设置工具（Cargo.toml、Cargo.lock 与各构建脚本默认值同步修改）。
 #
 # 版本号格式：点分数字（如 0.1.1）。递增规则：
 #   patch（默认）= 最后一段 +1           0.1.1  → 0.1.2
@@ -145,6 +145,10 @@ if [ "$DRY" = 1 ]; then
 fi
 
 # ---------- 写文件 ----------
+file_mode() {
+	stat -c '%a' "$1" 2>/dev/null || echo 644
+}
+
 write_toml() {
 	tmp="$(mktemp "${TMPDIR:-/tmp}/autheap-toml.XXXXXX")"
 	awk -v v="$1" '
@@ -156,7 +160,9 @@ write_toml() {
 		}
 		{ print }
 	' "$TOML" > "$tmp" || { rm -f "$tmp"; die "写入 $TOML 失败"; }
+	mode="$(file_mode "$TOML")"
 	mv "$tmp" "$TOML"
+	chmod "$mode" "$TOML"
 }
 
 write_lock() {
@@ -171,17 +177,64 @@ write_lock() {
 		}
 		{ print }
 	' "$LOCK" > "$tmp" || { rm -f "$tmp"; die "写入 $LOCK 失败"; }
+	mode="$(file_mode "$LOCK")"
 	mv "$tmp" "$LOCK"
+	chmod "$mode" "$LOCK"
+}
+
+# 同步各构建脚本里的静态默认版本号，避免 Cargo.toml 与打包默认值脱节。
+replace_default() {
+	file="$1"; old="$2"; newv="$3"
+	[ -f "$file" ] || return 0
+	# 用 awk index() 做字面替换，避免版本号里的 . 或注释里的 [] 被当成正则。
+	tmp="$(mktemp "${TMPDIR:-/tmp}/autheap-ver.XXXXXX")"
+	awk -v old="$old" -v newv="$newv" '
+		{
+			line = $0
+			out = ""
+			while ((i = index(line, old)) > 0) {
+				out = out substr(line, 1, i - 1) newv
+				line = substr(line, i + length(old))
+			}
+			print out line
+		}
+	' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+	mode="$(file_mode "$file")"
+	mv "$tmp" "$file"
+	chmod "$mode" "$file"
+}
+
+write_defaults() {
+	v="$1"
+	replace_default "packaging/openwrt/scripts/common.sh" \
+		'DEFAULT_VERSION="'"$current"'"' 'DEFAULT_VERSION="'"$v"'"'
+	replace_default "packaging/openwrt/scripts/build-luci.sh" \
+		"（默认 $current / 1）" "（默认 $v / 1）"
+	replace_default "packaging/desktop/build-deb.sh" \
+		"#   VERSION=$current ./build-deb.sh" "#   VERSION=$v ./build-deb.sh"
+	replace_default "packaging/openwrt/autheap-client/Makefile" \
+		"PKG_VERSION:=$current" "PKG_VERSION:=$v"
+	replace_default "packaging/openwrt/scripts/build-ipk.sh" \
+		"[--version $current]" "[--version $v]"
+	replace_default "packaging/openwrt/scripts/build-apk.sh" \
+		"[--version $current]" "[--version $v]"
 }
 
 write_toml "$new"
 write_lock "$new"
+write_defaults "$new"
 info "版本号: $base → $new"
 
 # ---------- 可选 git 操作 ----------
 TAG="${TAG_PREFIX}${new}"
 if [ "$DO_COMMIT" = 1 ]; then
-	git add "$TOML" "$LOCK"
+	git add "$TOML" "$LOCK" \
+		packaging/openwrt/scripts/common.sh \
+		packaging/openwrt/scripts/build-luci.sh \
+		packaging/desktop/build-deb.sh \
+		packaging/openwrt/autheap-client/Makefile \
+		packaging/openwrt/scripts/build-ipk.sh \
+		packaging/openwrt/scripts/build-apk.sh
 	if git diff --cached --quiet; then
 		info "没有变化，跳过提交"
 	else

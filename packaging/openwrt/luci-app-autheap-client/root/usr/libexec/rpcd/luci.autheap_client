@@ -1,10 +1,18 @@
 #!/bin/sh
 # rpcd exec 后端: luci.autheap_client
 #
-# 协议（与 /usr/libexec/rpcd/luci.argon_wallpaper 一致）：
+# 协议（与 /usr/libexec/rpcd/luci.* 一致）：
 #   $1 = list|call ; $2 = 方法名 ; 请求参数(JSON)从 stdin 读取；结果(jshn JSON)输出到 stdout
 # 提供方法: get_config / set_config / list_interfaces / list_plugins / status /
 #           log / log_files / log_clear / config_file / gen_config / nettest / control
+#
+# 与 LuCI 的同步约定：
+#   * UCI 是唯一配置源；/etc/autheap-client.conf 只是由 gen-config 生成的
+#     “后端实际读取的配置文件”。任何会改动 UCI 的动作（保存/应用/启停/生成）
+#     都会立即刷新这个文件，避免“页面上改了，后端仍在读旧配置”。
+#   * “开机自启”以 /etc/rc.d/S??autheap-client、K??autheap-client 软链为准，
+#     同时把 UCI 的 enabled 写成同样的值（init.d 的 enable/disable 也会同步）。
+#   * 仅 enable/disable 不启动/停止服务；start/stop/restart 才控制运行状态。
 
 . /usr/share/libubox/jshn.sh
 
@@ -13,7 +21,9 @@ PROG='/usr/bin/autheap'
 LOG_FILE_DEFAULT='/var/log/autheap-client.log'
 LOG_FILE="$LOG_FILE_DEFAULT"
 CONF_FILE='/etc/autheap-client.conf'
+CONF_UCI='/etc/config/autheap-client'
 GENCONF='/usr/libexec/autheap-client/gen-config'
+INITD='/etc/init.d/autheap-client'
 LOG_MAX_CHUNK=16384        # 单次默认最多返回 16KB
 LOG_HARD_MAX=262144        # 单次硬上限 256KB（历史视图用）
 LOG_BACKUPS=9              # 最多枚举 .1 ... .9 份历史
@@ -27,11 +37,31 @@ getval() { # getval <option> <default>
 }
 bval() { # bval <option> <default(0/1)>  -> 1/0（jshn 布尔只认数值 0/1）
 	case "$(getval "$1" "$2")" in
-		1|true|on) printf '1' ;;
+		1|true|on|yes|enable|enabled) printf '1' ;;
 		*) printf '0' ;;
 	esac
 }
 ival() { getval "$1" "$2"; }
+
+# 开机自启的真实状态：看 /etc/rc.d 下是否有 S/K 软链。
+# （UCI 的 enabled 只是状态指示；以 rc.d 为准，避免手工 enable/disable 后 UI 不同步）
+boot_enabled() {
+	local f
+	for f in /etc/rc.d/S??autheap-client /etc/rc.d/K??autheap-client; do
+		[ -e "$f" ] && { printf '1'; return; }
+	done
+	printf '0'
+}
+
+# 后端配置文件是否比 UCI 旧（或还不存在）——用于在 UI 上提示“需要重新生成”。
+config_stale() {
+	[ -f "$CONF_FILE" ] || { [ -f "$CONF_UCI" ] && { printf '1'; return; }; printf '0'; return; }
+	if [ -f "$CONF_UCI" ] && [ "$CONF_UCI" -nt "$CONF_FILE" ]; then
+		printf '1'
+	else
+		printf '0'
+	fi
+}
 
 # 后端**实际写入**的日志路径：后端读的是 $CONF_FILE（LuCI 可能改过 log_file），
 # 所以先取生成的配置文件里的 log_file，其次 UCI，最后默认值。
@@ -73,6 +103,23 @@ read_bytes() {
 	printf '%s' "$data"
 }
 
+# 当前启用的插件列表（UCI 新式 list plugins 优先；否则回退旧布尔位）。
+plugins_list() {
+	local p
+	if uci -q get "$CONF.main.plugins" >/dev/null 2>&1; then
+		for p in $(uci -q get "$CONF.main.plugins" 2>/dev/null | tr '\n' ' '); do
+			[ -n "$p" ] && printf '%s ' "$p"
+		done
+	else
+		[ "$(bval plugin_rjv3 1)" = 1 ] && printf 'rjv3 '
+		[ "$(bval plugin_printer 0)" = 1 ] && printf 'printer '
+		[ "$(bval plugin_stats 0)" = 1 ] && printf 'stats '
+		for p in $(printf '%s' "$(getval extra_plugins '')" | tr ',' ' '); do
+			[ -n "$p" ] && printf '%s ' "$p"
+		done
+	fi
+}
+
 # 追加日志文件列表（字段名 log_files）到当前 json 对象。
 # 同时给 status 与 log_files 两个方法复用：status 的 ACL 一直有授权，
 # 因此即使新版 ACL 尚未生效（未重启 rpcd / 未重新登录），「日志」页也能列出文件。
@@ -93,16 +140,26 @@ emit_log_files() {
 	json_close_array
 }
 
-# 追加整段配置到当前 json 对象
+# 追加整段配置到当前 json 对象（get_config / status 复用，字段与 LuCI 表单一致）
 emit_config() {
-	json_add_boolean enabled      "$(bval enabled 0)"
+	local p
+	json_add_boolean enabled      "$(boot_enabled)"
+	json_add_boolean enabled_uci  "$(bval enabled 0)"
+	json_add_boolean daemon       "$(bval daemon 0)"
+	json_add_int     boot_delay   "$(ival boot_delay 600)"
 	json_add_string  ifname       "$(getval ifname eth0)"
 	json_add_string  username     "$(getval username '')"
 	json_add_string  backend      "$(getval backend raw)"
 	json_add_boolean plugin_rjv3  "$(bval plugin_rjv3 1)"
 	json_add_boolean plugin_printer "$(bval plugin_printer 0)"
 	json_add_boolean plugin_stats "$(bval plugin_stats 0)"
+	json_add_boolean printer_log_recv "$(bval printer_log_recv 0)"
 	json_add_string  extra_plugins "$(getval extra_plugins '')"
+	json_add_array plugins
+	for p in $(plugins_list); do
+		json_add_string '' "$p"
+	done
+	json_close_array
 	json_add_int     heartbeat    "$(ival heartbeat 20)"
 	json_add_int     eap_bcast_addr "$(ival eap_bcast_addr 0)"
 	json_add_int     dhcp_type    "$(ival dhcp_type 2)"
@@ -116,6 +173,9 @@ emit_config() {
 	json_add_int     max_retries  "$(ival max_retries 3)"
 	json_add_int     max_failures "$(ival max_failures 3)"
 	json_add_int     stage_timeout "$(ival stage_timeout 5)"
+	json_add_boolean restart_on_logoff "$(bval restart_on_logoff 1)"
+	json_add_int     wait_after_fail "$(ival wait_after_fail 30)"
+	json_add_string  pid_file     "$(getval pid_file /var/run/autheap.pid)"
 	# beacon 保活插件
 	json_add_string  beacon_dst      "$(getval beacon_dst '')"
 	json_add_int     beacon_port     "$(ival beacon_port 8083)"
@@ -128,37 +188,99 @@ emit_config() {
 	json_add_int     log_rotate_secs "$(ival log_rotate_secs 300)"
 }
 
+# 重新生成后端读取的配置文件；失败时把 gen-config 的输出一起返回，便于排错。
+regen_config() {
+	[ -x "$GENCONF" ] || { printf '缺少 %s（luci-app-autheap-client 是否已安装？）' "$GENCONF"; return 1; }
+	"$GENCONF" "$CONF_FILE" >/dev/null 2>&1
+}
+
 # ---------- 方法: set_config ----------
+# 说明：新版 LuCI 表单直接走 UCI 保存/应用；本方法保留给外部脚本/旧前端，
+# 因此这里也必须覆盖全部表单项，避免“通过 ubus 改的值保存不上”。
 do_set() {
-	local changed=0 k v nv
+	local changed=0 k v nv _t p cur
 	json_load "$1"
-	for k in enabled plugin_rjv3 plugin_printer plugin_stats; do
+	for k in enabled daemon plugin_rjv3 plugin_printer plugin_stats printer_log_recv restart_on_logoff; do
 		json_get_var v "$k"
 		[ -n "$v" ] || continue
-		case "$v" in true|1) nv=1;; *) nv=0;; esac
+		case "$v" in true|1|on|yes) nv=1;; *) nv=0;; esac
 		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$nv" ] || { uci set "$CONF.main.$k=$nv"; changed=1; }
 	done
 	for k in heartbeat eap_bcast_addr dhcp_type max_dhcp_count max_retries max_failures stage_timeout \
-	         beacon_port beacon_interval log_max_kb log_keep log_rotate_secs; do
+	         wait_after_fail boot_delay beacon_port beacon_interval log_max_kb log_keep log_rotate_secs; do
 		json_get_var v "$k"
 		[ -n "$v" ] || continue
 		nv="$((v))"
 		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$nv" ] || { uci set "$CONF.main.$k=$nv"; changed=1; }
 	done
-	# 字符串字段：显式提交即写入（含清空为 "" 的情况，避免旧值残留）；缺失的键不动
+	# 字符串字段：显式提交即写入（含清空为 "" 的情况，避免旧值残留）；缺失的键不动。
+	# 注意要区分“选项不存在”和“选项存在但为空”：前者不写，后者写空值（例如
+	# pid_file 留空 = 不限制单实例）。
 	for k in ifname username password backend extra_plugins dhcp_script service version_str \
-	         fake_dns1 fake_dns2 fake_serial beacon_dst beacon_payload log_file; do
+	         fake_dns1 fake_dns2 fake_serial beacon_dst beacon_payload log_file pid_file; do
 		json_get_type _t "$k"
 		[ "$_t" = "string" ] || continue
 		json_get_var v "$k"
-		[ "$(uci -q get "$CONF.main.$k" 2>/dev/null)" = "$v" ] || { uci set "$CONF.main.$k=$v"; changed=1; }
+		if uci -q get "$CONF.main.$k" >/dev/null 2>&1; then
+			cur="$(uci -q get "$CONF.main.$k" 2>/dev/null)"
+		else
+			cur='__AUTHEAP_UNSET__'
+		fi
+		[ "$cur" = "$v" ] || { uci set "$CONF.main.$k=$v"; changed=1; }
 	done
+	# 插件列表：兼容 JSON 数组（新前端）与空格/逗号分隔字符串（旧前端/脚本）。
+	# 清空列表时写成一个“存在但为空”的字符串 option：gen-config 会把它当作
+	# 新版 plugins 列表（存在且为空 = 不启用任何插件），不会回退到旧布尔位。
+	json_get_type _t plugins
+	if [ "$_t" = "array" ]; then
+		# jshn 的 json_get_values 会把数组元素展开成空格分隔的字符串。
+		json_get_values nv plugins
+		uci -q delete "$CONF.main.plugins" 2>/dev/null
+		if [ -n "$nv" ]; then
+			for p in $nv; do
+				uci add_list "$CONF.main.plugins=$p"
+			done
+		else
+			uci set "$CONF.main.plugins="
+		fi
+		changed=1
+	elif [ "$_t" = "string" ]; then
+		json_get_var v plugins
+		nv="$(printf '%s' "$v" | tr ',' ' ')"
+		uci -q delete "$CONF.main.plugins" 2>/dev/null
+		if [ -n "$nv" ]; then
+			for p in $nv; do
+				[ -n "$p" ] || continue
+				uci add_list "$CONF.main.plugins=$p"
+			done
+		else
+			uci set "$CONF.main.plugins="
+		fi
+		changed=1
+	fi
+
 	[ "$changed" = 1 ] && uci commit "$CONF"
 	# 把 UCI 渲染成后端配置文件（autheap --config 实际读取它）
-	if [ -x "$GENCONF" ]; then
-		"$GENCONF" "$CONF_FILE" >/dev/null 2>&1 || true
-	fi
-	echo '{"res":true}'
+	regen_config || true
+
+	# enabled 变化时同步 rc.d 软链（仅影响开机自启，不启停当前进程）
+	for k in enabled; do
+		json_get_var v "$k"
+		[ -n "$v" ] || continue
+		case "$v" in true|1|on|yes) nv=1;; *) nv=0;; esac
+		if [ "$nv" = 1 ]; then
+			[ -x "$INITD" ] && "$INITD" enable >/dev/null 2>&1 || true
+		else
+			[ -x "$INITD" ] && "$INITD" disable >/dev/null 2>&1 || true
+		fi
+	done
+
+	json_init
+	json_add_boolean res 1
+	json_add_boolean enabled "$(boot_enabled)"
+	json_add_boolean config_stale "$(config_stale)"
+	json_dump
+	json_cleanup
 }
 
 # ---------- 方法: list_interfaces ----------
@@ -177,41 +299,34 @@ do_ifaces() {
 # ---------- 方法: status ----------
 do_status() {
 	json_init
-	json_add_boolean enabled "$(bval enabled 0)"
+	json_add_boolean enabled "$(boot_enabled)"
+	json_add_boolean enabled_uci "$(bval enabled 0)"
 	json_add_boolean running "$(pidof autheap >/dev/null 2>&1 && echo 1 || echo 0)"
 	json_add_string auth "$([ -f /var/run/autheap-client.auth ] && cat /var/run/autheap-client.auth 2>/dev/null || echo unknown)"
 	local pkgver binver
 	pkgver="$(sed -n 's/^Version: //p' /usr/lib/opkg/info/AuthEAP-Client.control 2>/dev/null | head -n1)"
+	[ -n "$pkgver" ] || pkgver="$(sed -n 's/^Version: //p' /usr/lib/opkg/info/autheap-client.control 2>/dev/null | head -n1)"
+	[ -n "$pkgver" ] || pkgver="$(awk '/^P:AuthEAP-Client$/{f=1;next} f&&/^V:/{sub(/^V:/,"");print;exit}' /lib/apk/db/installed 2>/dev/null)"
 	binver="$(/usr/bin/autheap --version 2>/dev/null | awk '{print $NF}')"
 	json_add_string version "${pkgver:-$binver}"
 	json_add_string core "${binver:-unknown}"
 	json_add_string username "$(getval username '')"
 	# 密码长度：只暴露长度不暴露内容，便于判断“LuCI 里改了密码但启动时用的还是旧值”
-	json_add_int pwdlen "$(getval password '' | wc -c)"
+	json_add_int pwdlen "$(getval password '' | wc -c | tr -dc '0-9')"
 	json_add_string ifname   "$(getval ifname eth0)"
 	json_add_object plugins
 		local p rjv3 printer stats beacon extra plugins
-		plugins="$(uci -q get "$CONF.main.plugins" 2>/dev/null)"
+		plugins="$(plugins_list)"
 		rjv3=0; printer=0; stats=0; beacon=0; extra=''
-		if uci -q get "$CONF.main.plugins" >/dev/null 2>&1; then
-			# 新：UCI list plugins（存在即以其为准，可以为空 = 不启用任何插件）
-			for p in $(printf '%s\n' "$plugins"); do
-				[ -n "$p" ] || continue
-				case "$p" in
-					rjv3) rjv3=1 ;;
-					printer) printer=1 ;;
-					stats) stats=1 ;;
-					beacon) beacon=1 ;;
-					*) [ -z "$extra" ] && extra="$p" || extra="$extra $p" ;;
-				esac
-			done
-		else
-			# 旧：布尔 + extra_plugins
-			rjv3="$(bval plugin_rjv3 1)"
-			printer="$(bval plugin_printer 0)"
-			stats="$(bval plugin_stats 0)"
-			extra="$(getval extra_plugins '')"
-		fi
+		for p in $plugins; do
+			case "$p" in
+				rjv3) rjv3=1 ;;
+				printer) printer=1 ;;
+				stats) stats=1 ;;
+				beacon) beacon=1 ;;
+				*) [ -z "$extra" ] && extra="$p" || extra="$extra $p" ;;
+			esac
+		done
 		# beacon 由“目标 IP + 间隔”驱动：填了目标即自动启用
 		if [ -n "$(getval beacon_dst '')" ] && [ "$(ival beacon_interval 60)" != "0" ]; then
 			beacon=1
@@ -234,11 +349,13 @@ do_status() {
 	json_add_int log_max_kb "$(ival log_max_kb 256)"
 	json_add_int log_keep "$(ival log_keep 3)"
 	json_add_int log_rotate_secs "$(ival log_rotate_secs 300)"
-	# 日志文件列表（当前 + 历史）；见 emit_log_files 注释
-	emit_log_files
-	# 后端实际读取的配置文件
+	json_add_int boot_delay "$(ival boot_delay 600)"
+	# 后端实际读取的配置文件 / 是否过期
 	json_add_string config_file "$CONF_FILE"
 	json_add_boolean config_file_exists "$([ -f "$CONF_FILE" ] && echo 1 || echo 0)"
+	json_add_boolean config_stale "$(config_stale)"
+	# 日志文件列表（当前 + 历史）；见 emit_log_files 注释
+	emit_log_files
 	# 兼容字段：旧版前端（浏览器可能仍缓存旧 JS）读的是这个字段，
 	# 新前端改用增量接口 log，不再使用它。保留可避免“升级后日志空白”。
 	local clog='' curlog=''
@@ -326,11 +443,21 @@ do_config_file() {
 	local content='' exists=0
 	if [ -f "$CONF_FILE" ]; then
 		exists=1
-		content="$(cat "$CONF_FILE" 2>/dev/null)"
+		# 只读展示时隐藏密码，避免只读 ACL 用户通过 config_file 拿到明文密码。
+		content="$(awk '
+			/^[[:space:]]*password[[:space:]]*=/ {
+				p = index($0, "=")
+				if (length($0) > p)
+					$0 = substr($0, 1, p) " ********"
+			}
+			{ print }
+		' "$CONF_FILE" 2>/dev/null)"
 	fi
 	json_init
 	json_add_string path "$CONF_FILE"
+	json_add_string source "$CONF_UCI"
 	json_add_boolean exists "$exists"
+	json_add_boolean stale "$(config_stale)"
 	json_add_string content "$content"
 	json_dump
 	json_cleanup
@@ -338,14 +465,27 @@ do_config_file() {
 
 # ---------- 方法: gen_config（按当前 UCI 重新生成配置文件）----------
 do_gen_config() {
-	if [ -x "$GENCONF" ]; then
-		"$GENCONF" "$CONF_FILE" >/dev/null 2>&1 || {
-			echo '{"res":false,"error":"gen-config 执行失败"}'
-			return
-		}
-		echo '{"res":true,"path":"'"$CONF_FILE"'"}'
+	local out=''
+	if [ ! -x "$GENCONF" ]; then
+		json_init
+		json_add_boolean res 0
+		json_add_string error "缺少 $GENCONF（luci-app-autheap-client 是否已安装？）"
+		json_dump; json_cleanup
+		return
+	fi
+	if out="$("$GENCONF" "$CONF_FILE" 2>&1)"; then
+		json_init
+		json_add_boolean res 1
+		json_add_string path "$CONF_FILE"
+		json_add_boolean stale "$(config_stale)"
+		json_add_string output "$out"
+		json_dump; json_cleanup
 	else
-		echo '{"res":false,"error":"缺少 '"$GENCONF"'"}'
+		json_init
+		json_add_boolean res 0
+		json_add_string path "$CONF_FILE"
+		json_add_string error "${out:-gen-config 执行失败}"
+		json_dump; json_cleanup
 	fi
 }
 
@@ -403,8 +543,11 @@ do_nettest() {
 }
 
 # ---------- 方法: control ----------
+# action: start|stop|restart|enable|disable
+#   enable/disable 只改“开机自启”（rc.d + UCI enabled），不启停当前进程；
+#   start/stop/restart 才控制运行状态。执行完成后重新生成后端配置。
 do_control() {
-	local action='' raw='' out='' ok=0 lf='' action_note=''
+	local action='' raw='' out='' ok=0 lf='' action_note='' i=0 res_txt=''
 	raw="$1"
 	json_load "$raw"
 	json_get_var action action
@@ -418,45 +561,60 @@ do_control() {
 		start|stop|restart|enable|disable) ;;
 		*) action='restart'; action_note="（未知动作，已按 restart 处理）" ;;
 	esac
+	# “启动”在已经运行时改为 restart：这样开机延迟等待中的进程也会被立即
+	# 重启并马上认证，而不是点击后仍继续等满 boot_delay。
+	if [ "$action" = start ] && pidof autheap >/dev/null 2>&1; then
+		action='restart'
+		action_note='（进程已在运行，改为 restart 以立即认证）'
+	fi
 	# 审计：把 LuCI 传来的原始请求与动作记到 syslog 与服务日志,
 	# 便于在“日志”页/ logread 里看到“到底请求了什么动作”。
 	logger -t autheap-client "control: action=$action raw=$raw"
+
 	case "$action" in
 		enable|disable)
-			uci set "$CONF.main.enabled=$([ "$action" = enable ] && echo 1 || echo 0)"
+			if out="$("$INITD" "$action" 2>&1)"; then ok=1; else ok=0; fi
+			if [ "$action" = enable ]; then
+				uci set "$CONF.main.enabled=1"
+			else
+				uci set "$CONF.main.enabled=0"
+			fi
 			uci commit "$CONF"
 			;;
-	esac
-	# 把 init.d 的真实结果拿出来：它拒绝启动（如未填账号/密码）时并不会输出到 stdout，
-	# 只往 syslog 写一行，以前这里永远返回成功，页面看不出失败。
-	if out="$(/etc/init.d/autheap-client "$action" 2>&1)"; then
-		ok=1
-	else
-		ok=0
-	fi
-	# init.d（尤其 USE_PROCD）未必靠返回码报错，而且 procd 派生进程有延迟，
-	# 所以这里轮询进程真实状态来判定成败（最多等 ~3 秒）。
-	case "$action" in
-		start|restart)
-			ok=0
-			local i=0
-			while [ "$i" -lt 15 ]; do
-				pidof autheap >/dev/null 2>&1 && { ok=1; break; }
-				sleep 0.2 2>/dev/null || sleep 1
-				i=$((i + 1))
-			done
+		start|stop|restart)
+			# 把 init.d 的真实结果拿出来：它拒绝启动（如未填账号/密码）时并不会输出到 stdout，
+			# 只往 syslog 写一行，以前这里永远返回成功，页面看不出失败。
+			if out="$("$INITD" "$action" 2>&1)"; then
+				ok=1
+			else
+				ok=0
+			fi
+			# init.d（尤其 USE_PROCD）未必靠返回码报错，而且 procd 派生进程有延迟，
+			# 所以这里轮询进程真实状态来判定成败（最多等 ~3 秒）。
+			case "$action" in
+				start|restart)
+					ok=0
+					i=0
+					while [ "$i" -lt 15 ]; do
+						pidof autheap >/dev/null 2>&1 && { ok=1; break; }
+						sleep 0.2 2>/dev/null || sleep 1
+						i=$((i + 1))
+					done
+					;;
+				stop)
+					ok=1
+					i=0
+					while [ "$i" -lt 15 ]; do
+						pidof autheap >/dev/null 2>&1 || break
+						sleep 0.2 2>/dev/null || sleep 1
+						i=$((i + 1))
+					done
+					pidof autheap >/dev/null 2>&1 && ok=0
+					;;
+			esac
 			;;
-		stop)
-			ok=1
-			local j=0
-			while [ "$j" -lt 15 ]; do
-				pidof autheap >/dev/null 2>&1 || break
-				sleep 0.2 2>/dev/null || sleep 1
-				j=$((j + 1))
-			done
-			pidof autheap >/dev/null 2>&1 && ok=0
-			;;
 	esac
+
 	if [ "$ok" = 0 ]; then
 		# init.d 拒绝启动时往往只往 syslog 记一行，捞最后一行为用户可见的原因
 		local tip
@@ -464,6 +622,10 @@ do_control() {
 		[ -n "$out" ] || out="$tip"
 		[ -n "$out" ] || out="（无输出）检查 logread -e autheap-client 与 uci show autheap-client"
 	fi
+
+	# 任何动作完成后都按当前 UCI 刷新后端配置文件；这样“保存/应用/启停”之后
+	# 配置页底部的文件内容、日志页路径以及后端下次启动读取的内容始终一致。
+	regen_config >/dev/null 2>&1 || true
 
 	# 把这次操作写进服务日志文件：在“日志”页就能直接看到谁触发了什么动作
 	lf="$(log_file_effective)"
@@ -479,6 +641,9 @@ do_control() {
 	json_init
 	json_add_boolean res "$ok"
 	json_add_string action "$action"
+	json_add_boolean enabled "$(boot_enabled)"
+	json_add_boolean running "$(pidof autheap >/dev/null 2>&1 && echo 1 || echo 0)"
+	json_add_boolean config_stale "$(config_stale)"
 	json_add_string output "$out"
 	json_dump
 	json_cleanup

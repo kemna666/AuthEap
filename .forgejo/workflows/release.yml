@@ -1,16 +1,20 @@
-# Forgejo Actions —— 发布流水线（**可直接在 Codeberg 的托管 runner 上运行**）
+# Forgejo Actions —— 发布流水线
 #
-# 启用前提（同 ci.yml）：仓库 Settings → Units → 勾选 “Enable Actions”；
-# 并添加仓库 Secret `RELEASE_TOKEN`（Codeberg 访问令牌，权限需含 write:repository）。
+# 适用场景同 `.forgejo/workflows/ci.yml`：自建 Forgejo runner（推荐）或 Codeberg
+# Forgejo Actions 托管 alpha。Codeberg 官方托管的默认推荐仍是 Woodpecker
+# （`.woodpecker.yml`）；若同时启用两套 CI，请只保留一套，避免重复构建/发布。
 #
-# runs-on 用 Codeberg 托管 runner 标签：codeberg-tiny(2min) / codeberg-small(5min) /
-# codeberg-medium(10min)，均可加 `-lazy` 后缀。托管 runner 不支持 Docker daemon，
-# 因此不写 `container:`，改用 rustup 装工具链（自建 runner 请把 runs-on 换成自己的 label）。
+# 前提：
+#   * 仓库 Settings → Units → 勾选 Actions（托管 alpha 或自建 runner）；
+#   * 仓库 Secret `RELEASE_TOKEN`：Codeberg/Forgejo 访问令牌，权限含
+#     `write:repository`（用于创建 Release 和上传附件）。
 #
 # 触发：
-#   - 推送 tag（如 0.1.17）：以 tag 作为版本号并发布；
-#   - 手动触发（workflow_dispatch）：版本号对远端最大版本自动 +1 后发布
-#     —— 即“每发布一个版本依次递增”，无需手工改 Cargo.toml。
+#   * push tag（例如 0.1.42）：直接把 tag 作为版本号；
+#   * 手动触发：对同版本线远端最大版本 +1 后发布。
+#
+# 产物通过 Forgejo artifact action 在 job 之间传递（GitHub 的
+# actions/upload-artifact@v4 在 Forgejo 上不兼容）。
 name: Release
 
 on:
@@ -22,14 +26,23 @@ on:
         description: '版本号递增级别（patch / minor / major）'
         default: patch
 
+env:
+  CARGO_TERM_COLOR: always
+  # CI 的版本由 version job / ci-version.sh 统一决定，构建脚本不要再自动 +1。
+  AUTHEAP_NO_VERSION_BUMP: "1"
+  RUST_BACKTRACE: 1
+
 jobs:
   # ---------- 计算版本号（整条流水线共用）----------
   version:
+    name: 计算版本号
     runs-on: codeberg-tiny
     outputs:
       version: ${{ steps.calc.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 计算版本号
         id: calc
@@ -41,24 +54,44 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "本次版本号: $V"
 
-  # ---------- 交叉编译 + 打包 + 上传 Release 附件 ----------
+  # ---------- 交叉编译 + 打包 .ipk / .apk ----------
   openwrt:
+    name: OpenWrt（${{ matrix.ipk_arch }}）
     runs-on: codeberg-medium
     needs: [ version ]
     strategy:
       fail-fast: false
-      max-parallel: 1          # 串行，避免并发创建同一个 Release
+      max-parallel: 3
       matrix:
         include:
           - triple: x86_64-unknown-linux-musl
             ipk_arch: x86_64
             apk_arch: x86_64
+            cross_deps: ''
           - triple: aarch64-unknown-linux-musl
             ipk_arch: aarch64_cortex-a53
             apk_arch: aarch64_cortex-a53
+            cross_deps: gcc-aarch64-linux-gnu
+          - triple: armv7-unknown-linux-musleabihf
+            ipk_arch: arm_cortex-a7_neon-vfpv4
+            apk_arch: arm_cortex-a7_neon-vfpv4
+            cross_deps: gcc-arm-linux-gnueabihf
+          - triple: arm-unknown-linux-musleabihf
+            ipk_arch: arm_arm1176jzf-s_vfp
+            apk_arch: arm_arm1176jzf-s_vfp
+            cross_deps: gcc-arm-linux-gnueabihf
+          - triple: riscv64gc-unknown-linux-musl
+            ipk_arch: riscv64_riscv64
+            apk_arch: riscv64_riscv64
+            cross_deps: gcc-riscv64-linux-gnu
           - triple: mipsel-unknown-linux-musl
             ipk_arch: mipsel_24kc
             apk_arch: mipsel_24kc
+            cross_deps: ''
+          - triple: mips-unknown-linux-musl
+            ipk_arch: mips_24kc
+            apk_arch: mips_24kc
+            cross_deps: ''
     steps:
       - uses: actions/checkout@v4
 
@@ -68,26 +101,61 @@ jobs:
             | sh -s -- -y --profile minimal --default-toolchain stable --component rust-src
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: 安装交叉编译依赖
+      - name: 安装打包/交叉编译依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends file curl
-          if [ "${{ matrix.triple }}" = "aarch64-unknown-linux-musl" ]; then
-            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          DEPS="${{ matrix.cross_deps }}"
+          if [ -n "$DEPS" ]; then
+            sudo apt-get install -y --no-install-recommends $DEPS
           fi
 
-      - name: 交叉编译 + 打包 + 发布
+      - name: 交叉编译 + 打包
         env:
+          CI_SKIP_PUBLISH: "1"    # 统一由 publish job 上传，避免并发创建/重复附件
           VERSION: ${{ needs.version.outputs.version }}
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           ./scripts/ci-build-package.sh \
             "${{ matrix.triple }}" "${{ matrix.ipk_arch }}" "${{ matrix.apk_arch }}"
+          file packaging/openwrt/staging/autheap
+          ls -l packaging/openwrt/staging/
 
-  # ---------- LuCI 界面包 + 桌面 deb ----------
-  luci-desktop:
-    runs-on: codeberg-small
-    needs: [ version, openwrt ]
+      - name: 上传 OpenWrt 产物
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: rel-openwrt-${{ matrix.ipk_arch }}
+          if-no-files-found: error
+          path: |
+            packaging/openwrt/staging/*.ipk
+            packaging/openwrt/staging/*.apk
+
+  # ---------- LuCI 界面包（纯打包）----------
+  luci:
+    name: LuCI 包
+    runs-on: codeberg-tiny
+    needs: [ version ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建 LuCI .ipk / .apk
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: ./packaging/openwrt/scripts/build-luci.sh "$VERSION" 1
+
+      - name: 上传 LuCI 产物
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: rel-luci
+          if-no-files-found: error
+          path: |
+            packaging/openwrt/staging/luci-app-autheap-client_*.ipk
+            packaging/openwrt/staging/luci-app-autheap-client-*.apk
+
+  # ---------- 桌面 Linux .deb ----------
+  desktop:
+    name: 桌面 deb
+    runs-on: codeberg-medium
+    needs: [ version ]
     steps:
       - uses: actions/checkout@v4
 
@@ -97,21 +165,46 @@ jobs:
             | sh -s -- -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dpkg-dev curl
+          sudo apt-get install -y --no-install-recommends dpkg-dev
 
-      - name: 构建 LuCI 包与 .deb
+      - name: 构建 .deb
         env:
           VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          ./packaging/openwrt/scripts/build-luci.sh "$VERSION" 1
-          VERSION="$VERSION" ./packaging/desktop/build-deb.sh
+        run: VERSION="$VERSION" ./packaging/desktop/build-deb.sh
 
-      - name: 发布到 Release
+      - name: 上传桌面 deb
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: rel-desktop
+          if-no-files-found: error
+          path: packaging/desktop/out/*.deb
+
+  # ---------- 聚合附件并发布到 Forgejo/Codeberg Release ----------
+  publish:
+    name: 发布 Release
+    runs-on: codeberg-small
+    needs: [ version, openwrt, luci, desktop ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部构建产物
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          pattern: rel-*
+          merge-multiple: true
+          path: dist
+
+      - name: 列出产物
+        run: ls -l dist
+
+      - name: 发布
         env:
           VERSION: ${{ needs.version.outputs.version }}
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          ./scripts/publish-release.sh "$VERSION" "$VERSION" \
-            packaging/openwrt/staging/*.ipk \
-            packaging/openwrt/staging/*.apk \
-            packaging/desktop/out/*.deb
+          set -eu
+          [ -n "${RELEASE_TOKEN:-}" ] || {
+            echo "[!] 缺少 Secret RELEASE_TOKEN（需要 write:repository 权限）" >&2
+            exit 1
+          }
+          ./scripts/publish-release.sh "$VERSION" "$VERSION" dist/*

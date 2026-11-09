@@ -446,8 +446,39 @@ impl App {
         stop
     }
 
+    /// 开机自启后的延迟等待：达到 `boot_delay` 秒后再开始认证。
+    ///
+    /// 只有 init.d 的 `boot()` 会设置 `AUTHEAP_BOOT_START=1`；手动
+    /// `/etc/init.d/autheap-client start` 或 LuCI 点“启动”不会等待。
+    /// 等待期间每 200ms 检查一次 shutdown，确保 stop/restart 能及时打断。
+    pub fn wait_boot_delay(&mut self) {
+        let secs = self.cfg.boot_delay;
+        if secs == 0 {
+            return;
+        }
+        self.write_auth_state("waiting");
+        crate::log_info!(
+            "开机自启：等待 {} 秒后再开始认证（在状态页点“启动”可立即认证）",
+            secs
+        );
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(secs) {
+            if self.shutdown.load(Ordering::Relaxed) {
+                crate::log_info!("开机等待被取消");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        crate::log_info!("开机等待结束，开始认证");
+    }
+
     /// 事件循环（真实运行）
     pub fn run(&mut self) -> Result<()> {
+        // 开机延迟期间可能收到 stop/restart 的 SIGTERM；此时不要再发认证帧。
+        if self.shutdown.load(Ordering::Relaxed) {
+            crate::log_info!("AuthEAP 已退出");
+            return Ok(());
+        }
         self.start()?;
         let mut sent_count: usize = 0;
         loop {
@@ -557,6 +588,20 @@ mod tests {
             out.len()
         );
         assert_eq!(EapolType::from_u8(out[nth].buf[15]), etype);
+    }
+
+    #[test]
+    fn boot_delay_wait_is_interruptible() {
+        let io = Arc::new(LoopbackIo::new());
+        let mut app = App::new(base_cfg(false), Box::new(io)).unwrap();
+        app.cfg.boot_delay = 60;
+        app.shutdown.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        app.wait_boot_delay();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "shutdown 后开机等待应立即返回"
+        );
     }
 
     #[test]

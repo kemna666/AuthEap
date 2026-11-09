@@ -1,16 +1,15 @@
 'use strict';
+
 'require rpc';
 'require ui';
+'require view';
 
-// 注意：LuCI 的 `expect` 不是字段白名单 —— 它只取【第一个键】的值，
-// 且类型不匹配时直接返回默认值（见 luci-static/resources/rpc.js handleCallReply）。
-// 所以这里要拿整个返回对象时，必须**不写 expect**（或写 `expect: {}`）。
+// 注意：rpc.declare 的 `expect` 只取第一个 key；这里需要完整返回对象，故省略。
 var callStatus = rpc.declare({
 	object: 'luci.autheap_client',
 	method: 'status'
 });
 
-// 专用的文件列表接口（字段名兼容 log_files / files 两种后端）
 var callLogFiles = rpc.declare({
 	object: 'luci.autheap_client',
 	method: 'log_files'
@@ -27,13 +26,10 @@ var callLogClear = rpc.declare({
 	method: 'log_clear'
 });
 
-var REFRESH_MS    = 1500;    // 增量拉取间隔
-var HISTORY_LIMIT = 131072;  // “加载完整历史”最多取 128KB
-var LOG_KEEP      = 4000;    // 内存中保留的最大行数
-var LOG_SHOW      = 800;     // 界面显示的最大行数
-
-// 若报 “Access denied”，通常是升级了 luci 包但 ACL 还没生效（rpcd 未重启 / 会话缓存旧 ACL）
-var ACL_HINT = '（若提示 Access denied：请在设备上执行 /etc/init.d/rpcd restart 并重新登录 LuCI，再 Ctrl+F5 强刷）';
+var REFRESH_MS = 1500;    // 增量拉取间隔
+var HISTORY_LIMIT = 131072; // “加载完整历史”最多取 128KB
+var LOG_KEEP = 4000;      // 内存中保留的最大行数
+var LOG_SHOW = 800;       // 界面显示的最大行数
 
 function hhmmss() {
 	var d = new Date();
@@ -46,20 +42,48 @@ function kb(n) {
 	return n < 1024 ? (n + ' B') : ((n / 1024).toFixed(1) + ' KB');
 }
 
-function err(e) { return (e && (e.message || e.toString())) || '未知错误'; }
+function err(e) {
+	return (e && (e.message || e.toString())) || '未知错误';
+}
 
-// 取日志文件列表：优先专用接口；若该接口不可用（例如 ACL 尚未生效、rpcd 未重启、
-// 设备上还是旧的 luci 包），自动回退到一直有授权的 status.log_files，避免整页报错。
 function pickFiles(r) {
 	r = r || {};
 	return r.log_files || r.files || [];
 }
 
-return L.view.extend({
+function viewStyle() {
+	return E('style', {}, [
+		'.autheap-log {',
+		'  font-family: var(--font-monospace, monospace);',
+		'  font-size: 12px;',
+		'  line-height: 1.45;',
+		'  white-space: pre-wrap;',
+		'  word-break: break-all;',
+		'  max-height: 60vh;',
+		'  overflow: auto;',
+		'  padding: 8px 10px;',
+		'  margin: 0;',
+		'  background: var(--background-color-high, rgba(127,127,127,.08));',
+		'  color: var(--text-color-high, inherit);',
+		'  border: 1px solid var(--border-color-medium, rgba(127,127,127,.35));',
+		'  border-radius: var(--border-radius, 4px);',
+		'}',
+		'.autheap-log .notice { opacity: .75; }',
+		'.autheap-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }'
+	].join('\n'));
+}
+
+function row(title, value) {
+	return E('div', { 'class': 'cbi-value' }, [
+		E('label', { 'class': 'cbi-value-title' }, title),
+		E('div', { 'class': 'cbi-value-field' }, value)
+	]);
+}
+
+return view.extend({
 	load: function () {
-		// status 是「永远有 ACL 授权」的方法，用它做基石：
-		// 即使 log / log_files 因 ACL 未刷新（未重启 rpcd / 未重新登录）打不开，
-		// 页面也要能渲染出来，并在页内提示原因。
+		// status 是“永远有 ACL 授权”的方法，用它做基石：
+		// 即使 log / log_files 因 ACL 未刷新打不开，页面也能渲染并提示原因。
 		return callStatus().then(function (st) {
 			return callLogFiles().then(function (r) {
 				return [ st || {}, pickFiles(r), '' ];
@@ -67,7 +91,7 @@ return L.view.extend({
 				return [ st || {}, pickFiles(st), '' ];
 			});
 		}, function (e) {
-			return [ {}, [], '无法调用后端 status：' + err(e) + ACL_HINT ];
+			return [ {}, [], _('无法调用后端 status：') + err(e) ];
 		});
 	},
 
@@ -76,25 +100,25 @@ return L.view.extend({
 		var files0 = (data && data[1]) || pickFiles(st);
 		var loadErr = (data && data[2]) || '';
 
-		// ---- 状态行元素 ----
 		var elFiles = E('select', { 'class': 'cbi-input-select' });
-		var elMeta = E('em', { 'style': 'font-size:12px;margin-left:8px' }, '尚未刷新');
-		var elErr = E('div', { 'style': 'color:#c62828;font-size:12px' });
-		var elLog = E('pre', {
-			'style': 'max-height:520px;overflow:auto;background:#1e1e1e;color:#9f9;padding:8px;' +
-			         'font-size:12px;line-height:1.35;white-space:pre-wrap;word-break:break-all'
-		}, '(暂无日志)');
+		var elMeta = E('em', { 'class': 'cbi-value-description' }, _('尚未刷新'));
+		var elErr = E('div', { 'class': 'alert-message error', 'style': 'display:none' });
+		var elLog = E('pre', { 'class': 'autheap-log' }, _('（暂无日志）'));
 		var autoChk = E('input', { 'type': 'checkbox', 'checked': true });
 
-		// ---- 视图状态 ----
 		var st8 = {
-			file: '',      // '' = 当前日志；'1'..'9' = 历史 .1/.2…
+			file: '',
 			offset: 0,
 			lines: [],
 			tail: '',
-			running: false,
+			running: !!st.running,
 			gen: 0
 		};
+
+		function showError(msg) {
+			elErr.textContent = msg || '';
+			elErr.style.display = msg ? '' : 'none';
+		}
 
 		function addNotice(text) {
 			st8.lines = st8.lines.concat([ text ]);
@@ -104,7 +128,7 @@ return L.view.extend({
 
 		function renderLog() {
 			var out = st8.lines.slice(-LOG_SHOW).reverse().join('\n');
-			elLog.textContent = out || '(暂无日志)';
+			elLog.textContent = out || _('（暂无日志）');
 		}
 
 		function pushChunk(text) {
@@ -130,20 +154,46 @@ return L.view.extend({
 			renderLog();
 		}
 
-		// ---- 文件列表 ----
 		function rebuildFiles(files) {
 			files = files || [];
 			var cur = st8.file;
-			while (elFiles.firstChild) elFiles.removeChild(elFiles.firstChild);
+			while (elFiles.firstChild)
+				elFiles.removeChild(elFiles.firstChild);
+
+			var hasCurrent = false;
+			for (var j = 0; j < files.length; j++)
+				if ((files[j].id || '') === '')
+					hasCurrent = true;
+
+			// 当前日志文件不存在时也保留“当前”选项，避免下拉框默认跳到某个历史文件，
+			// 而内部状态仍停留在当前文件（两边不一致）。
+			if (!hasCurrent && files.length)
+				elFiles.appendChild(E('option', { 'value': '' },
+					_('当前日志（文件不存在：') + (st.log_file || _('未知路径')) + '）'));
+
 			files.forEach(function (f) {
 				elFiles.appendChild(E('option', { 'value': f.id || '' },
-					(f.id ? ('历史 ' + f.name) : ('当前 ' + f.name)) + '（' + kb(f.size) + '）'));
+					(f.id ? (_('历史 ') + f.name) : (_('当前 ') + f.name)) + '（' + kb(f.size) + '）'));
 			});
-			if (!files.length)
+
+			if (!files.length) {
 				elFiles.appendChild(E('option', { 'value': '' },
-					'(暂无日志文件：' + (st.log_file || '未知路径') + ')'));
-			// 用属性赋值选中项（避免依赖 E() 对 null 属性的处理）
-			elFiles.value = cur;
+					_('（暂无日志文件：') + (st.log_file || _('未知路径')) + '）'));
+				elFiles.disabled = true;
+				elFiles.value = '';
+			}
+			else {
+				elFiles.disabled = false;
+				var found = false;
+				for (var j = 0; j < files.length; j++)
+					if ((files[j].id || '') === cur)
+						found = true;
+				var chosen = (found || cur === '') ? cur : (files[0].id || '');
+				elFiles.value = chosen;
+				// 选中的历史文件被清空/轮转掉时，内部状态也要跟着切回实际选中的文件。
+				if (chosen !== cur)
+					st8.file = chosen;
+			}
 		}
 
 		function refreshFileList() {
@@ -156,25 +206,21 @@ return L.view.extend({
 			});
 		}
 
-		// log 接口不可用时的兜底：status 一直有 ACL 授权，且它自带最多 2KB 的日志快照
-		// （字段 log）。这样即使 ACL 未刷新，“日志”页也能看到内容而不是空白。
+		// log 接口不可用时的兜底：status 一直有 ACL 授权，且它自带最多 2KB 的日志快照。
 		function statusSnapshot(e) {
 			return callStatus().then(function (s) {
 				s = s || {};
 				if (s.log) {
 					st8.lines = String(s.log).split('\n');
 					st8.tail = '';
+					addNotice(_('---- log 接口不可用（') + err(e) + _('），已改用 status 日志快照 ----'));
+					addNotice(_('---- 若刚升级 LuCI 包，请执行 /etc/init.d/rpcd restart 并重新登录 ----'));
 					renderLog();
-					addNotice('---- log 接口不可用（' + err(e) + '），已改用 status 日志快照 ----');
-					addNotice(ACL_HINT);
 				}
 				throw e;
 			}, function () { throw e; });
 		}
 
-		// ---- 拉取 ----
-		// 注意：callLog 声明了 params，必须**按位置**传参（传对象会把整个对象
-		// 塞进第一个参数 offset，后端就收不到正确的 file/mode/limit）。
 		function loadHistory(file) {
 			return callLog(0, file, 'history', HISTORY_LIMIT)
 				.then(function (r) { applyHistory(r); }, function (e) { return statusSnapshot(e); });
@@ -185,9 +231,10 @@ return L.view.extend({
 				.then(function (r) {
 					r = r || {};
 					if (typeof r.size === 'number' && r.size < st8.offset) {
-						// 文件被轮转/清空：重置缓冲后重新加载历史，并给出提示
-						addNotice('---- 日志已轮转/清空（' + hhmmss() + '），已重新加载 ----');
-						return loadHistory(st8.file).then(function () { renderLog(); });
+						return loadHistory(st8.file).then(function () {
+							addNotice(_('---- 日志已轮转/清空（') + hhmmss() + _('），已重新加载 ----'));
+							renderLog();
+						});
 					}
 					if (typeof r.offset === 'number')
 						st8.offset = r.offset;
@@ -215,39 +262,56 @@ return L.view.extend({
 			function done() {
 				if (--pend > 0) return;
 				if (my !== st8.gen) return;
-				elMeta.textContent = '最后更新 ' + hhmmss() +
-					'  ·  已读 ' + kb(st8.offset) + '  ·  保留 ' + st8.lines.length + ' 行' +
-					(st8.file === '' ? '' : '（历史文件，自动刷新已暂停）');
-				elErr.textContent = errs.join(' | ');
+				elMeta.textContent = _('最后更新 ') + hhmmss() +
+					' · ' + _('已读 ') + kb(st8.offset) + ' · ' + _('保留 ') + st8.lines.length + _(' 行') +
+					(st8.file === '' ? '' : _('（历史文件，自动刷新已暂停）'));
+				showError(errs.join(' | '));
 				schedule();
 			}
 
 			fetchTail().then(function () {}, function (e) {
-				if (my === st8.gen) errs.push('日志刷新失败: ' + err(e) +
-					'（若刚升级，请重新登录 LuCI 并 Ctrl+F5 强制刷新）');
+				if (my === st8.gen)
+					errs.push(_('日志刷新失败：') + err(e));
 			}).then(done);
 
 			callStatus().then(function (s) {
-				st = s || {};
+				s = s || {};
+				var logPathChanged = (st.log_file && s.log_file && st.log_file !== s.log_file);
+				st = s;
+				st8.running = !!st.running;
+				// 配置页改了 log_file 后，日志页无需重新打开也应刷新文件列表。
+				if (logPathChanged)
+					return refreshFileList();
 			}, function () {}).then(done);
 		}
 
 		function reload(keepOffset) {
 			st8.gen++;
-			if (!keepOffset) st8.offset = 0;
+			if (!keepOffset)
+				st8.offset = 0;
 			return refreshFileList().then(function () {
 				return loadHistory(st8.file);
+			}).catch(function (e) {
+				showError(_('加载日志失败：') + err(e));
 			});
 		}
 
-		// ---- 事件 ----
 		elFiles.addEventListener('change', function () {
 			st8.file = elFiles.value || '';
 			reload(false).then(schedule);
 		});
 
 		autoChk.addEventListener('change', function () {
-			if (autoChk.checked) { st8.gen++; tick(); } else schedule();
+			if (autoChk.checked) { st8.gen++; tick(); }
+			else schedule();
+		});
+
+		document.addEventListener('visibilitychange', function () {
+			if (!document.hidden && autoChk.checked && st8.file === '') {
+				if (timer) { window.clearTimeout(timer); timer = null; }
+				st8.gen++;
+				tick();
+			}
 		});
 
 		window.addEventListener('beforeunload', function () {
@@ -256,64 +320,101 @@ return L.view.extend({
 		});
 
 		function btn(label, cls, fn) {
-			return E('button', { 'class': 'cbi-button ' + cls, click: fn }, label);
+			return E('button', { 'class': 'cbi-button ' + cls, 'click': fn }, label);
+		}
+
+		function clearLogs() {
+			ui.showModal(_('清空日志'), [
+				E('p', {}, _('确定清空当前日志与全部历史日志？此操作不可撤销。')),
+				E('div', { 'class': 'right' }, [
+					E('button', {
+						'class': 'cbi-button',
+						'click': ui.hideModal
+					}, _('取消')),
+					E('button', {
+						'class': 'cbi-button cbi-button-negative',
+						'click': function () {
+							ui.hideModal();
+							callLogClear().then(function () {
+								return reload(false);
+							}).then(schedule).catch(function (e) {
+								showError(_('清空失败：') + err(e));
+							});
+						}
+					}, _('清空'))
+				])
+			]);
 		}
 
 		var section = E('div', { 'class': 'cbi-section' }, [
-			E('div', { 'style': 'display:flex;align-items:center;gap:10px;flex-wrap:wrap' }, [
-				E('label', {}, [ autoChk, ' 自动刷新（实时，1.5 秒）' ]),
-				btn('立即刷新', 'cbi-button-action', function () { st8.gen++; tick(); }),
-				btn('加载完整历史', 'cbi-button-neutral', function () {
-					st8.gen++;
-					loadHistory(st8.file).then(function () { elMeta.textContent = '已加载历史'; });
-				}),
-				btn('跳到最新', 'cbi-button-neutral', function () {
-					st8.gen++;
-					st8.file = '';
-					elFiles.value = '';
-					reload(false).then(schedule);
-				}),
-				btn('清空日志', 'cbi-button-reset', function () {
-					if (!confirm('确定清空当前与全部历史日志？')) return;
-					callLogClear().then(function () { return reload(false); }).then(schedule)
-						.catch(function (e) {
-							elErr.textContent = '清空失败: ' + err(e) + ACL_HINT;
-						});
-				})
-			]),
-			E('div', { 'style': 'margin:8px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, [
-				E('strong', {}, '日志文件:'),
-				elFiles,
-				elMeta
-			]),
-			elErr,
-			elLog
+			E('h3', {}, _('日志文件')),
+			E('div', { 'class': 'cbi-section-node' }, [
+				row(_('当前文件'), E('div', { 'class': 'autheap-inline' }, [
+					elFiles,
+					autoChk,
+					E('label', {}, _('自动刷新')),
+					E('button', {
+						'class': 'cbi-button cbi-button-action',
+						'click': function () { st8.gen++; tick(); }
+					}, _('立即刷新')),
+					E('button', {
+						'class': 'cbi-button cbi-button-neutral',
+						'click': function () {
+							st8.gen++;
+							loadHistory(st8.file).then(function () {
+								elMeta.textContent = _('已加载历史');
+							}, function (e) {
+								showError(_('加载历史失败：') + err(e));
+							});
+						}
+					}, _('加载完整历史')),
+					E('button', {
+						'class': 'cbi-button cbi-button-neutral',
+						'click': function () {
+							st8.gen++;
+							st8.file = '';
+							elFiles.value = '';
+							reload(false).then(schedule);
+						}
+					}, _('跳到最新')),
+					E('button', {
+						'class': 'cbi-button cbi-button-reset',
+						'click': clearLogs
+					}, _('清空日志')),
+					elMeta
+				])),
+				elErr,
+				row(_('日志内容'), elLog)
+			])
 		]);
 
 		st8.gen++;
 		rebuildFiles(files0);
 		if (loadErr)
-			elErr.textContent = loadErr;
-		if (!st.running && !loadErr) {
-			// 服务没跑时后端不会写新日志（已有文件仍可读）——这种情况最常见
-			addNotice('---- 后端服务当前未运行（日志可能为空）：' +
-				'/etc/init.d/autheap-client start 或者到状态页点“启动” ----');
-		} else if (st.running && !(files0 || []).length) {
-			// 进程在跑但日志文件不存在：说明这个进程不是由本版 init.d 启动的
-			// （旧版启动脚本/手动命令行启动不会创建日志文件）
-			addNotice('---- 服务在运行，但日志文件不存在：' + (st.log_file || '未知路径') +
-				'。说明当前进程不是本版 init.d 启动的（手动命令行启动/旧启动脚本）；' +
-				'执行 /etc/init.d/autheap-client restart 后即可看到日志 ----');
-		}
+			showError(loadErr);
+
+		// 先加载日志内容，再追加提示行；否则 loadHistory 会清空刚加的提示。
 		loadHistory('').then(function () {
+			if (!st.running && !loadErr) {
+				addNotice(_('---- 后端服务当前未运行（日志可能为空）：/etc/init.d/autheap-client start ----'));
+			}
+			else if (st.running && !(files0 || []).length) {
+				addNotice(_('---- 服务在运行，但日志文件不存在：') + (st.log_file || _('未知路径')) +
+					_('。执行 /etc/init.d/autheap-client restart 后即可看到日志 ----'));
+			}
+			renderLog();
+		}).catch(function (e) {
+			showError(_('读取日志失败：') + err(e));
+		}).then(function () {
 			tick();
 		});
 
 		return E('div', { 'class': 'cbi-map' }, [
-			E('h2', {}, 'AuthEAP-Client 日志'),
+			viewStyle(),
+			E('h2', {}, _('AuthEAP-Client 日志')),
 			E('div', { 'class': 'cbi-map-descr' },
-				'实时查看当前日志，并可查看历史日志（自动轮转清理后保留的 .1/.2…）。' +
-				'轮转/清理策略在“配置”页调整（log_max_kb / log_keep / log_rotate_secs）。'),
+				_('实时查看当前日志，并可查看历史日志（自动轮转清理后保留的 .1/.2…）。' +
+				  '轮转/清理策略在“配置 → 日志”中调整。')),
 			section
 		]);
 	}

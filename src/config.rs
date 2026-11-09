@@ -138,6 +138,8 @@ pub struct Config {
     pub beacon_payload: Option<Vec<u8>>,
     // 其它
     pub daemon: bool,
+    /// 开机自启后等待多少秒再开始认证（仅 boot 启动时生效；0=立即认证）
+    pub boot_delay: u64,
     /// 单实例锁文件（认证进程只允许一个实例；None = 不做单实例限制）
     pub pid_file: Option<String>,
     pub verbose: u8,
@@ -178,6 +180,7 @@ impl Default for Config {
             beacon_interval: 60,
             beacon_payload: None,
             daemon: false,
+            boot_delay: 600,
             pid_file: Some(crate::lockfile::DEFAULT_PID_FILE.to_string()),
             verbose: 0,
         }
@@ -294,6 +297,10 @@ impl Config {
             }
             "restart_on_logoff" => self.restart_on_logoff = parse_bool(v).ok_or_else(bad)?,
             "daemon" | "background" => self.daemon = parse_bool(v).ok_or_else(bad)?,
+            // 开机自启后的认证延迟（秒）；仅 init 以 boot 方式启动时生效
+            "boot_delay" | "boot_delay_secs" | "boot_wait" => {
+                self.boot_delay = parse_u64(v).ok_or_else(bad)?
+            }
             // 单实例锁文件；显式留空 = 不做单实例限制
             "pid_file" | "pidfile" | "pid" | "lock_file" | "lockfile" => {
                 self.pid_file = opt_string(v)
@@ -420,7 +427,8 @@ mod tests {
              beacon_port = 8083\n\
              beacon_interval = 15\n\
              beacon_payload = 00112233aabb\n\
-             restart_on_logoff = yes\n",
+             restart_on_logoff = yes\n\
+             boot_delay = 600\n",
         )
         .unwrap();
 
@@ -441,6 +449,7 @@ mod tests {
             Some(&[0x00, 0x11, 0x22, 0x33, 0xaa, 0xbb][..])
         );
         assert!(cfg.restart_on_logoff);
+        assert_eq!(cfg.boot_delay, 600);
         let _ = std::fs::remove_file(&path);
     }
 

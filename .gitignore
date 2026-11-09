@@ -5,6 +5,7 @@
 
 # mipsel soft-float 交叉工具链（CI/本地按需下载）
 /musl-cross
+/musl-cross-mips
 
 # OpenWrt 打包中间产物
 packaging/openwrt/staging/
